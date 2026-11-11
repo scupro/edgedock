@@ -1,0 +1,22 @@
+{
+  "name": "edgedock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Serverless file manager & Markdown sharing on Cloudflare Workers",
+  "license": "MIT",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "build": "npm run build -w web && npm run build -w server",
+    "build:web": "npm run build -w web",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "test": "npm run test -w server",
+    "dev": "wrangler dev",
+    "deploy": "npm run build:web && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply edgedock --local",
+    "db:migrate:remote": "wrangler d1 migrations apply edgedock --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.160.0"
+  },
+  "engines": { "node": ">=22.5" }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+data/
+coverage/
+.env
+.env.*
+!.env.example
+web/dev-dist/

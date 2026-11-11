@@ -1,0 +1,26 @@
+{
+  "name": "@edgedock/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.node.json",
+    "test": "vitest run",
+    "build": "npm run build:node",
+    "build:node": "esbuild src/node.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/node.mjs --packages=external",
+    "start:node": "node dist/node.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.7",
+    "aws4fetch": "^1.0.20",
+    "fast-xml-parser": "^5.12.0",
+    "hono": "^4.13.18"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261110.1",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.2",
+    "typescript": "~5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
