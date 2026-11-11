@@ -44,7 +44,7 @@ export function makeApp(env: Env) {
     if (init.token) headers.set('authorization', `Bearer ${init.token}`);
     return app.request(p, { ...init, headers }, env);
   };
-  const json = async <T = any>(p: string, init: RequestInit & { token?: string; body?: any } = {}): Promise<{ status: number; body: T }> => {
+  const json = async <T = any>(p: string, init: Omit<RequestInit, 'body'> & { token?: string; body?: any } = {}): Promise<{ status: number; body: T }> => {
     const headers = new Headers(init.headers);
     let body = init.body;
     if (body !== undefined && typeof body !== 'string' && !(body instanceof Uint8Array)) {

@@ -1,5 +1,6 @@
 import { decryptString, encryptString } from '../lib/crypto';
 import { badRequest, notFound } from '../lib/errors';
+import { mimeFromPath } from '../lib/mime';
 import { basename, dirname, isWithin, joinPath, normalizePath } from '../lib/path';
 import type { Env } from '../lib/types';
 import { getDriverDefinition } from './registry';
@@ -162,10 +163,13 @@ export class Vfs {
     return r.mount.driver.read(r.rel, { range });
   }
 
-  write(vpath: string, body: WriteBody, opts?: WriteOptions): Promise<void> {
+  write(vpath: string, body: WriteBody, opts: WriteOptions = {}): Promise<void> {
     const r = this.mustResolve(vpath);
     if (r.mount.driver.capabilities.readOnly) throw badRequest('Storage is read-only');
-    return r.mount.driver.write(r.rel, body, opts);
+    // HTTP clients (curl, some WebDAV clients) send form/octet defaults: store a real type instead
+    const ct = opts.contentType;
+    const contentType = !ct || /x-www-form-urlencoded|multipart\/form-data|^application\/octet-stream/i.test(ct) ? mimeFromPath(vpath) : ct;
+    return r.mount.driver.write(r.rel, body, { ...opts, contentType });
   }
 
   async mkdir(vpath: string): Promise<void> {

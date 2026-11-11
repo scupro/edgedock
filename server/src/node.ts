@@ -65,10 +65,11 @@ const api = createApp(runtime);
 const root = new Hono<AppEnv>();
 const staticDir = process.env.STATIC_DIR;
 if (staticDir && existsSync(staticDir)) {
-  const indexHtml = readFileSync(path.join(staticDir, 'index.html'), 'utf8');
+  const indexFile = path.join(staticDir, 'index.html');
   root.route('/', api);
   root.use('*', serveStatic({ root: path.relative(process.cwd(), staticDir) || '.' }));
-  root.get('*', (c) => c.html(indexHtml));
+  // SPA fallback (read per request so a rebuilt frontend is picked up without restart)
+  root.get('*', (c) => c.html(readFileSync(indexFile, 'utf8')));
 } else {
   root.route('/', api);
 }
