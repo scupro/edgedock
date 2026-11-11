@@ -129,6 +129,8 @@ export interface SessionInfo {
   mode: 'native' | 'emulated';
   uploadedParts: number[];
   resumed: boolean;
+  /** provider needs parts in order (OneDrive / Google Drive upload sessions) */
+  sequential?: boolean;
 }
 
 const RETRIABLE_STATUS = new Set([0, -2, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
@@ -254,7 +256,8 @@ export async function uploadMultipart(
 
   let useDirect = !!opts.direct;
   let directWorked = false;
-  let limit = maxConc;
+  let limit = s.sequential ? 1 : maxConc;
+  const ceiling = s.sequential ? 1 : maxConc;
   let active = 0;
   let streak = 0;
   const slotWaiters: (() => void)[] = [];
@@ -324,7 +327,7 @@ export async function uploadMultipart(
       }
       inflight.delete(n);
       if (!err) {
-        if (++streak >= 3 && limit < maxConc) {
+        if (++streak >= 3 && limit < ceiling) {
           limit++;
           streak = 0;
         }
@@ -375,7 +378,7 @@ export async function uploadMultipart(
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(maxConc, list.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(ceiling, list.length) }, worker));
     if (failure) throw failure;
   };
 
