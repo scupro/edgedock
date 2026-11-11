@@ -9,3 +9,4 @@ coverage/
 .env.*
 !.env.example
 web/dev-dist/
+web/public/vendor/

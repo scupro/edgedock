@@ -4,7 +4,10 @@
   "private": true,
   "description": "Serverless file manager & Markdown sharing on Cloudflare Workers",
   "license": "MIT",
-  "workspaces": ["server", "web"],
+  "workspaces": [
+    "server",
+    "web"
+  ],
   "scripts": {
     "build": "npm run build -w web && npm run build -w server",
     "build:web": "npm run build -w web",
@@ -18,5 +21,10 @@
   "devDependencies": {
     "wrangler": "^4.160.0"
   },
-  "engines": { "node": ">=22.5" }
+  "engines": {
+    "node": ">=22.5"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "^0.8.15"
+  }
 }

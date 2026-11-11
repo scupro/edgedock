@@ -1,0 +1,35 @@
+{
+  "name": "@edgedock/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.json && vite build",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "preview": "vite preview",
+    "predev": "node scripts/copy-vditor.mjs",
+    "prebuild": "node scripts/copy-vditor.mjs"
+  },
+  "dependencies": {
+    "docx": "^9.5.1",
+    "docx-preview": "^0.3.7",
+    "epubjs": "^0.3.93",
+    "highlight.js": "^11.11.1",
+    "html-to-image": "^1.11.13",
+    "html2pdf.js": "^0.14.0",
+    "marked": "^16.0.0",
+    "pdfjs-dist": "^6.5.438",
+    "vditor": "^3.11.1",
+    "vue": "^3.5.18",
+    "vue-router": "^4.6.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.8",
+    "vite-plugin-pwa": "^2.0.0",
+    "vue-tsc": "^3.0.5"
+  }
+}

@@ -1,0 +1,4 @@
+ENCRYPTION_KEY=change-me-to-a-long-random-string
+# JWT_SECRET=
+# ADMIN_USERNAME=admin
+# ADMIN_PASSWORD=change-me-please

@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# EdgeDock — Cloudflare Workers configuration (integrated deploy: API + SPA)
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+# ─────────────────────────────────────────────────────────────────────────────
+name = "edgedock"
+main = "server/src/worker.ts"
+compatibility_date = "2025-09-01"
+# nodejs_compat is not required by EdgeDock itself; kept off for a smaller bundle.
+# compatibility_flags = ["nodejs_compat"]
+
+# Workers Logs (optional)
+[observability]
+enabled = true
+
+# ── Static assets: the built Vue SPA (npm run build:web → web/dist) ──────────
+# API / raw / WebDAV paths always hit the Worker first; everything else is
+# served from assets, unknown paths fall back to index.html (SPA routing).
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/raw/*", "/dav", "/dav/*"]
+
+# ── D1 database ──────────────────────────────────────────────────────────────
+# Create it once:   npx wrangler d1 create edgedock
+# then paste the printed database_id below (the GitHub Action does this automatically).
+[[d1_databases]]
+binding = "DB"
+database_name = "edgedock"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "server/migrations"
+
+# ── Workflows: long-running, retriable jobs ──────────────────────────────────
+[[workflows]]
+name = "edgedock-index"
+binding = "INDEX_WORKFLOW"
+class_name = "IndexWorkflow"
+
+[[workflows]]
+name = "edgedock-sync"
+binding = "SYNC_WORKFLOW"
+class_name = "SyncWorkflow"
+
+# ── Cron Triggers (UTC) ──────────────────────────────────────────────────────
+#  "*/30 * * * *" → clean expired upload sessions (aborts S3 multipart) & shares
+#  "17 3 * * *"   → rebuild filename search index + run enabled sync jobs
+[triggers]
+crons = ["*/30 * * * *", "17 3 * * *"]
+
+# ── Plain variables (non-secret) ─────────────────────────────────────────────
+[vars]
+# Comma-separated origins allowed to call the API when the frontend is deployed
+# separately (Pages / Vercel). Use "*" to allow any origin. Empty = same-origin only.
+CORS_ORIGINS = ""
+# Admin session lifetime in hours
+JWT_TTL_HOURS = "168"
+
+# ── Secrets (set with `npx wrangler secret put <NAME>`, never commit them) ───
+#  ENCRYPTION_KEY  (required) encrypts storage credentials (AES-GCM) — `openssl rand -base64 32`
+#  JWT_SECRET      (optional) signs admin JWTs; derived from ENCRYPTION_KEY when unset
+#  ADMIN_USERNAME  (optional) initial admin; otherwise use first-run setup in the UI
+#  ADMIN_PASSWORD  (optional) initial admin password (≥ 8 chars)
+#
+# Local development: put them in .dev.vars (see .dev.vars.example).
