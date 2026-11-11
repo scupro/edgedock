@@ -1,3 +1,4 @@
+import { getSettings } from '../lib/settings';
 /**
  * Long-running jobs, written as resumable "chunks" so they can run as
  * Cloudflare Workflow steps (each step = one chunk, state passed between
@@ -202,11 +203,15 @@ export async function runSyncInline(env: Env, jobId: string): Promise<SyncState>
 }
 
 // ------------------------------------------------------------ cleanup
-export async function runCleanup(env: Env): Promise<{ uploadsAborted: number; sharesDeleted: number }> {
+export async function runCleanup(env: Env): Promise<{ uploadsAborted: number; orphansAborted: number; sharesDeleted: number }> {
   const vfs = await Vfs.create(env);
-  const uploadsAborted = await new UploadService(env, vfs).cleanupExpired();
+  const svc = new UploadService(env, vfs);
+  const uploadsAborted = await svc.cleanupExpired();
+  // provider-side multipart uploads / temp folders no session owns (older than the session TTL)
+  const ttl = (await getSettings(env)).uploadSessionTtlHours;
+  const orphansAborted = await svc.cleanupOrphans(Math.max(1, ttl) * 3600_000).catch(() => 0);
   const sharesDeleted = await consumeExpiredShares(env);
   await env.DB.prepare('DELETE FROM job_runs WHERE started_at < ?').bind(Date.now() - 30 * 86400_000).run();
-  return { uploadsAborted, sharesDeleted };
+  return { uploadsAborted, orphansAborted, sharesDeleted };
 }
 

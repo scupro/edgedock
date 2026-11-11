@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import Modal from '../../components/Modal.vue';
-import { api } from '../../lib/api';
+import { absoluteUrl, api } from '../../lib/api';
+import { probeBucketCors } from '../../lib/upload';
 import { locale, t } from '../../lib/i18n';
 import { toast } from '../../lib/store';
 
-interface Field { key: string; label: string; type: string; secret?: boolean; required?: boolean; default?: any; placeholder?: string; help?: string; options?: { value: string; label: string }[] }
-interface DriverType { type: string; label: string; fields: Field[] }
+interface Field { key: string; label: string; labelZh?: string; type: string; secret?: boolean; required?: boolean; default?: any; placeholder?: string; help?: string; helpZh?: string; options?: { value: string; label: string }[] }
+interface DriverType { type: string; label: string; fields: Field[]; oauth?: string | null; notes?: string; notesZh?: string }
 
 const storages = ref<any[]>([]);
 const types = ref<DriverType[]>([]);
@@ -45,6 +46,7 @@ function openNew() {
 function openEdit(s: any) {
   editing.value = s;
   testResult.value = null;
+  cors.value = null;
   Object.assign(form, { name: s.name, type: s.type, mountPath: s.mountPath, isDefault: s.isDefault, enabled: s.enabled, config: { ...s.config } });
 }
 
@@ -72,7 +74,52 @@ const ZH_LABELS: Record<string, string> = {
   pathStyle: 'Path-style 位址（MinIO / R2 / 自訂端點請勾選）', accessKeyId: 'Access Key ID', secretAccessKey: 'Secret Access Key',
   presignExpires: '預簽名有效秒數', directDownload: '下載時直接轉址到預簽名 URL（節省 Worker 流量）', url: 'WebDAV 網址', username: '使用者名稱', password: '密碼',
 };
-const fieldLabel = (f: Field) => (locale.value === 'zh-TW' && ZH_LABELS[f.key]) || f.label;
+const zh = computed(() => locale.value === 'zh-TW');
+const fieldLabel = (f: Field) => (zh.value && (f.labelZh || ZH_LABELS[f.key])) || f.label;
+const fieldHelp = (f: Field) => (zh.value && f.helpZh) || f.help || '';
+const typeNotes = computed(() => (zh.value && currentType.value?.notesZh) || currentType.value?.notes || '');
+
+// ---------------------------------------------------------------- OAuth helper (OneDrive / Google Drive)
+const redirectUri = computed(() => (currentType.value?.oauth ? absoluteUrl(`/api/oauth/${currentType.value.oauth}/callback`) : ''));
+async function authorize() {
+  if (editing.value?.isNew) return toast(t('storage.oauth.saveFirst'));
+  try {
+    // persist current client id/secret first so the callback can use them
+    await api(`/api/storages/${editing.value.id}`, { method: 'PUT', body: payload() });
+    const { url } = await api<{ url: string }>(`/api/oauth/${currentType.value!.oauth}/start`, { body: { storageId: editing.value.id, redirectUri: redirectUri.value } });
+    const w = window.open(url, 'edgedock-oauth', 'width=600,height=720');
+    const onMsg = async (e: MessageEvent) => {
+      if (e.data?.type !== 'edgedock-oauth') return;
+      window.removeEventListener('message', onMsg);
+      w?.close();
+      if (e.data.ok) {
+        toast(t('storage.oauth.done'));
+        await load();
+        const s = storages.value.find((x) => x.id === editing.value?.id);
+        if (s) openEdit(s);
+      } else toast(e.data.error || 'OAuth failed');
+    };
+    window.addEventListener('message', onMsg);
+  } catch (e) {
+    toast((e as Error).message);
+  }
+}
+
+// ---------------------------------------------------------------- bucket CORS
+const cors = ref<null | { busy: boolean; server?: any; browser?: { ok: boolean; etagExposed: boolean; error?: string }; applied?: boolean; applyError?: string }>(null);
+async function corsCheck(apply = false) {
+  const id = editing.value?.id;
+  if (!id) return toast(t('storage.oauth.saveFirst'));
+  cors.value = { busy: true };
+  try {
+    const server = await api<any>(`/api/storages/${id}/cors/${apply ? 'apply' : 'check'}`, { body: { origin: location.origin } });
+    const browser = await probeBucketCors(id).catch((e) => ({ ok: false, etagExposed: false, error: (e as Error).message }));
+    cors.value = { busy: false, server, browser, applied: server.applied, applyError: server.applyError };
+  } catch (e) {
+    cors.value = { busy: false, applyError: (e as Error).message };
+  }
+}
+const corsInstructions = computed(() => (cors.value?.server?.instructions ? (zh.value ? cors.value.server.instructions.zh : cors.value.server.instructions.en) : ''));
 
 function payload() {
   const config: Record<string, any> = {};
@@ -136,7 +183,7 @@ const secretSaved = (f: Field) => !editing.value?.isNew && editing.value?.secret
           <tbody>
             <tr v-for="s in storages" :key="s.id">
               <td>{{ s.name }}</td>
-              <td>{{ s.type }}<span v-if="s.config.provider" class="muted"> · {{ s.config.provider }}</span></td>
+              <td>{{ s.type }}<span v-if="s.config.provider" class="muted"> · {{ s.config.provider }}</span><span v-if="s.readOnly" class="badge warn">{{ t('storage.readonly') }}</span></td>
               <td class="mono">{{ s.mountPath }}</td>
               <td>
                 <span v-if="s.isDefault" class="badge">{{ t('common.default') }}</span>
@@ -173,6 +220,14 @@ const secretSaved = (f: Field) => !editing.value?.isNew && editing.value?.secret
             <select v-if="f.type === 'select'" v-model="form.config[f.key]" @change="f.key === 'provider' && applyPreset()">
               <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
             </select>
+            <textarea
+              v-else-if="f.type === 'textarea'"
+              v-model="form.config[f.key]"
+              rows="4"
+              class="mono"
+              :required="f.required && !secretSaved(f)"
+              :placeholder="secretSaved(f) ? t('storage.secretKept') : f.placeholder"
+            />
             <input
               v-else
               v-model="form.config[f.key]"
@@ -181,8 +236,38 @@ const secretSaved = (f: Field) => !editing.value?.isNew && editing.value?.secret
               :placeholder="secretSaved(f) ? t('storage.secretKept') : f.key === 'endpoint' && presetHint ? presetHint : f.placeholder"
               autocomplete="off"
             />
+            <small v-if="fieldHelp(f)" class="muted">{{ fieldHelp(f) }}</small>
           </label>
         </template>
+        <p v-if="typeNotes" class="muted" style="white-space: pre-line; margin: 0">{{ typeNotes }}</p>
+        <div v-if="currentType?.oauth" class="card stack" style="gap: 0.4rem">
+          <span class="muted">{{ t('storage.oauth.hint') }}</span>
+          <code class="mono" style="word-break: break-all">{{ redirectUri }}</code>
+          <div class="row"><button type="button" :disabled="editing.isNew" @click="authorize">{{ t('storage.oauth.authorize') }}</button></div>
+        </div>
+        <div v-if="form.type === 's3' && !editing.isNew" class="card stack" style="gap: 0.4rem">
+          <div class="row">
+            <button type="button" :disabled="cors?.busy" @click="corsCheck(true)">{{ t('storage.cors.apply') }}</button>
+            <button type="button" :disabled="cors?.busy" @click="corsCheck(false)">{{ t('storage.cors.check') }}</button>
+            <span v-if="cors?.busy" class="muted">{{ t('common.loading') }}</span>
+          </div>
+          <template v-if="cors && !cors.busy">
+            <p v-if="cors.applied" style="color: var(--c-primary); margin: 0">{{ t('storage.cors.applied') }}</p>
+            <p v-if="cors.applyError" style="color: var(--c-danger); margin: 0">{{ t('storage.cors.applyFailed') }}: {{ cors.applyError }}</p>
+            <p v-if="cors.server" class="muted" style="margin: 0">
+              {{ t('storage.cors.server') }}: {{ cors.server.ok ? '✓' : '✗' }}
+              <template v-if="cors.server.preflight">(HTTP {{ cors.server.preflight.status }}, Allow-Origin: {{ cors.server.preflight.allowOrigin || '—' }})</template>
+              · {{ cors.server.provider }}
+            </p>
+            <p v-if="cors.browser" class="muted" style="margin: 0">{{ t('storage.cors.browser') }}: {{ cors.browser.ok ? '✓' : '✗ ' + (cors.browser.error || '') }}</p>
+            <p v-if="cors.browser?.ok && !cors.browser.etagExposed" class="muted" style="margin: 0">{{ t('storage.cors.etagHidden') }}</p>
+            <p v-if="cors.browser?.ok" style="color: var(--c-primary); margin: 0">{{ t('storage.cors.ok') }}</p>
+            <template v-else>
+              <p style="color: var(--c-danger); margin: 0">{{ t('storage.cors.fail') }}</p>
+              <pre class="mono" style="white-space: pre-wrap; font-size: 0.8rem; margin: 0">{{ corsInstructions }}</pre>
+            </template>
+          </template>
+        </div>
         <div class="row">
           <label class="check"><input type="checkbox" v-model="form.enabled" />{{ t('common.enabled') }}</label>
           <label class="check"><input type="checkbox" v-model="form.isDefault" />{{ t('common.default') }}</label>

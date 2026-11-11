@@ -18,6 +18,14 @@ export interface Settings {
   maxShareContentKB: number;
   /** Incomplete upload sessions expire after N hours */
   uploadSessionTtlHours: number;
+  /** Parallel part uploads per file in the browser (reduced automatically on errors) */
+  uploadConcurrency: number;
+  /** Attempts per part before the file fails */
+  uploadRetries: number;
+  /** Per-part timeout (seconds) */
+  uploadChunkTimeoutSec: number;
+  /** Hard cap for any request body sent through the Worker (MiB). Workers Free/Pro accept 100 MB. */
+  proxyMaxChunkMB: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -30,10 +38,20 @@ export const DEFAULT_SETTINGS: Settings = {
   multipartThresholdMB: 50,
   maxShareContentKB: 900,
   uploadSessionTtlHours: 48,
+  uploadConcurrency: 3,
+  uploadRetries: 5,
+  uploadChunkTimeoutSec: 120,
+  proxyMaxChunkMB: 50,
 };
 
+/** Workers request body limit on Free/Pro plans is 100 MB; stay well below it. */
+export const WORKER_BODY_HARD_LIMIT_MB = 95;
+export function proxyLimitBytes(s: Settings): number {
+  return Math.min(Math.max(1, s.proxyMaxChunkMB || 50), WORKER_BODY_HARD_LIMIT_MB) * 1024 * 1024;
+}
+
 /** Settings safe to expose to anonymous visitors. */
-export const PUBLIC_KEYS: (keyof Settings)[] = ['siteTitle', 'defaultLanguage', 'externalPreviewTemplate', 'externalPreviewExts', 'uploadPartSizeMB', 'multipartThresholdMB'];
+export const PUBLIC_KEYS: (keyof Settings)[] = ['siteTitle', 'defaultLanguage', 'externalPreviewTemplate', 'externalPreviewExts', 'uploadPartSizeMB', 'multipartThresholdMB', 'uploadConcurrency', 'uploadRetries', 'uploadChunkTimeoutSec', 'proxyMaxChunkMB'];
 
 export async function getSettings(env: Env): Promise<Settings> {
   const { results } = await env.DB.prepare('SELECT key, value FROM settings').all<{ key: string; value: string }>();

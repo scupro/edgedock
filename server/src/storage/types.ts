@@ -59,15 +59,27 @@ export interface PresignedRequest {
 export interface UploadedPart {
   partNumber: number;
   etag: string;
+  /** bytes, when the provider reports it (ListParts) */
+  size?: number;
+}
+
+export interface PendingUpstreamUpload {
+  key: string;
+  uploadId: string;
+  /** epoch ms */
+  initiated?: number;
 }
 
 export interface MultipartSupport {
   create(path: string, opts: { contentType?: string }): Promise<string>;
   presignPart?(path: string, uploadId: string, partNumber: number, expiresIn: number): Promise<PresignedRequest>;
-  uploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number): Promise<{ etag: string }>;
+  /** `md5` (base64) is forwarded as Content-MD5 where the provider verifies it. */
+  uploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number, opts?: { md5?: string }): Promise<{ etag: string }>;
   complete(path: string, uploadId: string, parts: UploadedPart[]): Promise<void>;
   abort(path: string, uploadId: string): Promise<void>;
   listParts?(path: string, uploadId: string): Promise<UploadedPart[]>;
+  /** In-progress uploads under the driver root (orphan cleanup). Keys are storage-relative paths. */
+  listUploads?(): Promise<PendingUpstreamUpload[]>;
 }
 
 export interface DriverCapabilities {
@@ -75,6 +87,10 @@ export interface DriverCapabilities {
   multipart: boolean;
   rangeRead: boolean;
   readOnly?: boolean;
+  /** largest part the provider accepts in one request (bytes) */
+  maxPartSize?: number;
+  /** smallest non-final part (bytes); default 5 MiB (S3 rule) for native multipart, 1 MiB emulated */
+  minPartSize?: number;
 }
 
 export interface StorageDriver {
@@ -101,18 +117,25 @@ export interface StorageDriver {
 export interface DriverField {
   key: string;
   label: string;
-  type: 'text' | 'password' | 'boolean' | 'number' | 'select';
+  /** 正體中文 label for the admin UI */
+  labelZh?: string;
+  type: 'text' | 'password' | 'boolean' | 'number' | 'select' | 'textarea';
   /** stored encrypted (AES-GCM) */
   secret?: boolean;
   required?: boolean;
   default?: string | number | boolean;
   placeholder?: string;
   help?: string;
+  helpZh?: string;
   options?: { value: string; label: string }[];
 }
 
 export interface DriverContext {
   fetch: typeof fetch;
+  /** storage row id (absent when testing an unsaved config) */
+  storageId?: string;
+  /** D1 + encryption, for drivers that keep metadata / tokens in the database */
+  env?: import('../lib/types').Env;
 }
 
 export interface DriverDefinition {
@@ -121,5 +144,10 @@ export interface DriverDefinition {
   /** runtimes that can host this driver */
   runtimes: ('workers' | 'node')[];
   fields: DriverField[];
+  /** OAuth helper flow supported by the admin UI (/api/oauth/<provider>/start) */
+  oauth?: 'onedrive' | 'gdrive';
+  /** one-line description / limits shown in the admin UI */
+  notes?: string;
+  notesZh?: string;
   create(config: Record<string, unknown>, ctx: DriverContext): StorageDriver;
 }

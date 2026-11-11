@@ -70,6 +70,10 @@ async function changePassword() {
         <label class="field"><span>{{ t('settings.multipartThresholdMB') }}</span><input v-model.number="s.multipartThresholdMB" type="number" min="5" /></label>
         <label class="field"><span>{{ t('settings.maxShareContentKB') }}</span><input v-model.number="s.maxShareContentKB" type="number" min="1" max="1800" /></label>
         <label class="field"><span>{{ t('settings.uploadSessionTtlHours') }}</span><input v-model.number="s.uploadSessionTtlHours" type="number" min="1" /></label>
+        <label class="field"><span>{{ t('settings.uploadConcurrency') }}</span><input v-model.number="s.uploadConcurrency" type="number" min="1" max="8" /></label>
+        <label class="field"><span>{{ t('settings.uploadRetries') }}</span><input v-model.number="s.uploadRetries" type="number" min="1" max="10" /></label>
+        <label class="field"><span>{{ t('settings.uploadChunkTimeoutSec') }}</span><input v-model.number="s.uploadChunkTimeoutSec" type="number" min="10" /></label>
+        <label class="field"><span>{{ t('settings.proxyMaxChunkMB') }}</span><input v-model.number="s.proxyMaxChunkMB" type="number" min="5" max="95" /></label>
         <label class="field"><span>{{ t('settings.externalPreviewExts') }}</span><input v-model="s.externalPreviewExts" class="mono" /></label>
       </div>
       <label class="field">
