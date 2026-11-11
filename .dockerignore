@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+.wrangler
+.git
+.github
+.dev.vars
+.env
+.env.*
+data
+coverage
+*.log
+web/public/vendor

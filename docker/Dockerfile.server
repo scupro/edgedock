@@ -1,0 +1,38 @@
+# EdgeDock API server (Node.js + SQLite + local filesystem storage)
+# Build from the repository root:
+#   docker build -f docker/Dockerfile.server -t edgedock-server .
+
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY server/package.json server/package.json
+COPY web/package.json web/package.json
+RUN npm ci --workspace server --include-workspace-root=false --ignore-scripts
+COPY server server
+RUN npm run build:node --workspace server
+
+FROM node:22-bookworm-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY server/package.json server/package.json
+COPY web/package.json web/package.json
+RUN npm ci --workspace server --include-workspace-root=false --omit=dev --ignore-scripts \
+ && npm cache clean --force
+
+FROM node:22-bookworm-slim
+ENV NODE_ENV=production \
+    DATA_DIR=/data \
+    PORT=8787 \
+    HOST=0.0.0.0
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=build /app/server/dist ./server/dist
+COPY server/migrations ./server/migrations
+COPY server/package.json ./server/package.json
+RUN mkdir -p /data/files && chown -R node:node /data
+USER node
+VOLUME ["/data"]
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "server/dist/node.mjs"]

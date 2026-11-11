@@ -1,0 +1,37 @@
+# EdgeDock self-hosted: Node API server + nginx frontend
+#   export ENCRYPTION_KEY="$(openssl rand -base64 32)"
+#   docker compose up -d --build      → http://localhost:8080
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    image: edgedock-server
+    restart: unless-stopped
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY (openssl rand -base64 32)}
+      JWT_SECRET: ${JWT_SECRET:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      JWT_TTL_HOURS: ${JWT_TTL_HOURS:-168}
+      DATA_DIR: /data
+      PORT: "8787"
+    volumes:
+      - edgedock-data:/data
+    expose:
+      - "8787"
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    image: edgedock-web
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "${EDGEDOCK_PORT:-8080}:80"
+
+volumes:
+  edgedock-data:
