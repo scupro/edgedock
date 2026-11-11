@@ -127,7 +127,7 @@ describe('S3 driver against a live S3-protocol server', () => {
     expect(session.mode).toBe('native');
     expect(session.total_parts).toBe(2);
     // part 1 directly to S3 with a presigned URL; ETag "not exposed" -> ack without etag
-    const urls = await svc.signParts(session.id, [1]);
+    const { urls } = await svc.signParts(session.id, [1]);
     const put = await fetch(urls[1].url, { method: 'PUT', body: data.slice(0, 5 * MiB) });
     expect(put.ok).toBe(true);
     await svc.ackPart(session.id, 1, null, 5 * MiB);
@@ -143,7 +143,7 @@ describe('S3 driver against a live S3-protocol server', () => {
   it('abort multipart', async (ctx) => {
     if (!available) return ctx.skip();
     const d = drv();
-    const id = await d.multipart.create('/aborted.bin', {});
+    const id = (await d.multipart.create('/aborted.bin', {})) as string;
     await d.multipart.abort('/aborted.bin', id);
     expect(await d.stat('/aborted.bin')).toBeNull();
   });

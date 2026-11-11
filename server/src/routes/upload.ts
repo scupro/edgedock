@@ -43,14 +43,14 @@ uploadRoutes.post('/plan', async (c) => {
   // Anything that might have to go through the Worker in one request must fit its body limit,
   // so files above min(threshold, proxy limit) are always chunked.
   const chunkAbove = Math.min(settings.multipartThresholdMB * MiB, limits.proxyMaxBytes);
+  const mp = driver.multipart;
+  // direct browser → provider parts: S3 presigned parts, HuggingFace LFS part URLs, OneDrive / Google Drive session URLs
+  const directParts = !noDirect && !!(mp?.presignPart || mp?.presignParts) && (caps.presign || !!caps.directParts);
   const canDirect = !noDirect && caps.presign;
-  // single-request storages (HuggingFace: one commit per file) never use emulated multipart
-  if (!driver.multipart && caps.maxUploadSize !== undefined) {
-    if (size > limits.proxyMaxBytes) throw new HttpError(413, `Files above ${Math.floor(limits.proxyMaxBytes / MiB)} MiB cannot be uploaded to this storage through the Worker`, 'too_large');
-    return c.json({ ...base, strategy: 'proxy' });
-  }
-  if (size > chunkAbove) {
-    return c.json({ ...base, strategy: 'multipart', direct: canDirect && !!driver.multipart?.presignPart });
+  // single-request writes are buffered by some drivers (HuggingFace): above that, always multipart
+  const mustChunk = caps.maxWriteSize !== undefined && size > Math.min(caps.maxWriteSize, chunkAbove);
+  if (size > chunkAbove || mustChunk) {
+    return c.json({ ...base, strategy: 'multipart', direct: directParts, sha256: !!caps.needsSha256 });
   }
   if (canDirect && driver.presignPut) {
     const signed = await driver.presignPut(r.rel, { contentType });
@@ -94,10 +94,11 @@ async function svc(c: { env: AppEnv['Bindings'] }) {
   return new UploadService(c.env, await Vfs.create(c.env));
 }
 
-function sessionJson(s: { session: any; parts: any[]; resumed?: boolean }, sequential = false) {
+function sessionJson(s: { session: any; parts: any[]; resumed?: boolean }, sequential = false, signBatch = 1) {
   const { session, parts } = s;
   return {
     sequential,
+    signBatch,
     id: session.id,
     path: session.path,
     size: session.size,
@@ -112,6 +113,20 @@ function sessionJson(s: { session: any; parts: any[]; resumed?: boolean }, seque
   };
 }
 
+/** Origin the browser uploads from (Google Drive binds resumable sessions to it for CORS). */
+function browserOrigin(c: { req: { header(n: string): string | undefined; url: string }; env: AppEnv['Bindings'] }): string {
+  const o = c.req.header('origin');
+  if (o && /^https?:\/\/[^/]+$/.test(o)) return o;
+  if (c.env.PUBLIC_URL) {
+    try {
+      return new URL(c.env.PUBLIC_URL).origin;
+    } catch {
+      /* fallthrough */
+    }
+  }
+  return new URL(c.req.url).origin;
+}
+
 function checkOwner(p: Principal, session: { created_by: string | null; path: string }) {
   if (p.permission === 'admin') return;
   if (session.created_by !== `${p.kind}:${p.id}`) throw forbidden('Not your upload session');
@@ -119,7 +134,7 @@ function checkOwner(p: Principal, session: { created_by: string | null; path: st
 }
 
 uploadRoutes.post('/multipart/init', async (c) => {
-  const b = await c.req.json<{ path: string; size: number; contentType?: string; fingerprint?: string }>();
+  const b = await c.req.json<{ path: string; size: number; contentType?: string; fingerprint?: string; sha256?: string; sample?: string }>();
   const p = normalizePath(b.path);
   const principal = c.get('principal');
   assertWrite(principal, p);
@@ -130,13 +145,16 @@ uploadRoutes.post('/multipart/init', async (c) => {
     size: b.size,
     contentType: b.contentType,
     fingerprint: b.fingerprint,
+    sha256: typeof b.sha256 === 'string' ? b.sha256 : undefined,
+    sample: typeof b.sample === 'string' ? b.sample.slice(0, 1024) : undefined,
+    origin: browserOrigin(c),
     partSize: settings.uploadPartSizeMB * MiB,
     maxPartSize: proxyLimitBytes(settings),
     createdBy: `${principal.kind}:${principal.id}`,
     ttlHours: settings.uploadSessionTtlHours,
   });
   const drv = (await Vfs.create(c.env)).mounts.find((m) => m.row.id === s.session.storage_id)?.driver;
-  return c.json({ ...sessionJson(s, !!drv?.capabilities.sequentialParts && s.session.mode === 'native'), limits: clientLimits(settings) });
+  return c.json({ ...sessionJson(s, !!drv?.capabilities.sequentialParts && s.session.mode === 'native', drv?.multipart?.presignParts ? 10_000 : 1), limits: clientLimits(settings) });
 });
 
 /** Session state; `?verify=1` reconciles recorded parts against the provider (ListParts / temp parts). */
@@ -153,7 +171,7 @@ uploadRoutes.post('/multipart/:id/sign', async (c) => {
   const s = await service.get(c.req.param('id'));
   checkOwner(c.get('principal'), s.session);
   const { partNumbers } = await c.req.json<{ partNumbers: number[] }>();
-  return c.json({ urls: await service.signParts(s.session.id, partNumbers ?? []) });
+  return c.json(await service.signParts(s.session.id, partNumbers ?? []));
 });
 
 uploadRoutes.put('/multipart/:id/parts/:n', async (c) => {

@@ -1,6 +1,6 @@
 import { TMP_DIR } from '../storage/base';
 import type { Resolved, Vfs } from '../storage/mounts';
-import type { PresignedRequest, StorageDriver, WriteBody } from '../storage/types';
+import type { MultipartCreated, PresignedRequest, StorageDriver, WriteBody } from '../storage/types';
 import { uuid } from './crypto';
 import { badRequest, classifyUpstream, gone, HttpError, notFound, RetriableError } from './errors';
 import { fromBase64, md5Tap, multipartEtag, toHex } from './md5';
@@ -115,6 +115,12 @@ export class UploadService {
     size: number;
     contentType?: string;
     fingerprint?: string;
+    /** SHA-256 hex of the whole file (HuggingFace LFS) */
+    sha256?: string;
+    /** base64 of the first 512 bytes (HuggingFace preupload) */
+    sample?: string;
+    /** browser origin (Google Drive resumable sessions) */
+    origin?: string;
     partSize: number;
     /** max bytes per part (Worker body limit) */
     maxPartSize?: number;
@@ -126,11 +132,13 @@ export class UploadService {
     // resume an active session for the same file
     if (input.fingerprint) {
       const ex = await this.env.DB.prepare(
-        "SELECT id FROM upload_sessions WHERE fingerprint = ? AND path = ? AND size = ? AND status = 'active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, checksum FROM upload_sessions WHERE fingerprint = ? AND path = ? AND size = ? AND status = 'active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1",
       )
         .bind(input.fingerprint, path, input.size, Date.now())
-        .first<{ id: string }>();
-      if (ex) {
+        .first<{ id: string; checksum: string | null }>();
+      // a session bound to a content hash only resumes for the same hash
+      const sameContent = !ex?.checksum || !input.sha256 || ex.checksum === `sha256:${input.sha256.toLowerCase()}`;
+      if (ex && sameContent) {
         const cur = await this.get(ex.id);
         // verify what the server/provider really has before telling the client to skip parts
         const parts = await this.reconcile(cur.session, cur.parts).catch(() => cur.parts);
@@ -147,11 +155,20 @@ export class UploadService {
     let partSize = choosePartSize(input.size, input.partSize, { min, max });
     if (caps.partSizeMultiple) partSize = Math.max(caps.partSizeMultiple, Math.floor(partSize / caps.partSizeMultiple) * caps.partSizeMultiple);
     if (caps.maxUploadSize !== undefined && input.size > caps.maxUploadSize) throw new HttpError(413, `This storage accepts files up to ${caps.maxUploadSize} bytes through EdgeDock`, 'too_large');
-    const totalParts = Math.max(1, Math.ceil(input.size / partSize));
+    if (caps.needsSha256 && !input.sha256) throw badRequest('sha256 of the file is required for this storage');
+    let totalParts = Math.max(1, Math.ceil(input.size / partSize));
     let upstreamId: string | null = null;
+    let created: MultipartCreated | null = null;
     if (driver.multipart) {
       try {
-        upstreamId = await driver.multipart.create(r.rel, { contentType: input.contentType, size: input.size, partSize });
+        const res = await driver.multipart.create(r.rel, { contentType: input.contentType, size: input.size, partSize, sha256: input.sha256?.toLowerCase(), sample: input.sample, origin: input.origin });
+        if (typeof res === 'string') upstreamId = res;
+        else {
+          created = res;
+          upstreamId = res.uploadId;
+          if (res.partSize) partSize = res.partSize;
+          totalParts = res.totalParts ?? Math.max(1, Math.ceil(input.size / partSize));
+        }
       } catch (e) {
         rethrowUpstream(e, 'Create multipart upload');
       }
@@ -170,18 +187,22 @@ export class UploadService {
       mode,
       upstream_upload_id: upstreamId,
       status: 'active',
+      checksum: created?.checksum ?? null,
       created_by: input.createdBy,
       created_at: now,
       updated_at: now,
       expires_at: now + input.ttlHours * 3600_000,
     };
     await this.env.DB.prepare(
-      `INSERT INTO upload_sessions (id, fingerprint, path, storage_id, object_key, size, part_size, total_parts, content_type, mode, upstream_upload_id, status, created_by, created_at, updated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+      `INSERT INTO upload_sessions (id, fingerprint, path, storage_id, object_key, size, part_size, total_parts, content_type, mode, upstream_upload_id, status, checksum, created_by, created_at, updated_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
     )
-      .bind(s.id, s.fingerprint, s.path, s.storage_id, s.object_key, s.size, s.part_size, s.total_parts, s.content_type, s.mode, s.upstream_upload_id, s.created_by, now, now, s.expires_at)
+      .bind(s.id, s.fingerprint, s.path, s.storage_id, s.object_key, s.size, s.part_size, s.total_parts, s.content_type, s.mode, s.upstream_upload_id, s.checksum ?? null, s.created_by, now, now, s.expires_at)
       .run();
-    return { session: s, parts: [], resumed: false };
+    // parts the provider already holds (e.g. the LFS object exists on the Hub): nothing to upload
+    const pre: PartRow[] = [];
+    for (const u of created?.uploadedParts ?? []) pre.push(await this.recordPart(s, u.partNumber, u.etag, expectedPartSize(s, u.partNumber)));
+    return { session: s, parts: pre, resumed: false };
   }
 
   private assertActive(s: UploadSessionRow) {
@@ -189,18 +210,47 @@ export class UploadService {
     if (s.expires_at <= Date.now()) throw gone('Upload session expired');
   }
 
-  /** Presigned URLs for direct-to-S3 part uploads (native mode + presign-capable driver only). */
-  async signParts(id: string, partNumbers: number[], expiresIn = 3600): Promise<Record<number, PresignedRequest>> {
-    const { session } = await this.get(id);
+  /**
+   * Presigned requests for direct browser → provider part uploads (S3 presigned part URLs, HuggingFace LFS
+   * part URLs, OneDrive / Google Drive session URLs). Also reports parts the provider already holds
+   * (`uploaded`) and whether the provider restarted the upload (`reset`: recorded parts were dropped).
+   */
+  async signParts(id: string, partNumbers: number[], expiresIn = 3600): Promise<{ urls: Record<number, PresignedRequest>; uploaded?: number[]; reset?: boolean }> {
+    const { session, parts } = await this.get(id);
     this.assertActive(session);
     const { driver } = this.storageOf(session);
-    if (session.mode !== 'native' || !driver.multipart?.presignPart) throw badRequest('Direct part upload is not supported by this storage');
+    const mp = driver.multipart;
+    if (session.mode !== 'native' || !(mp?.presignPart || mp?.presignParts)) throw badRequest('Direct part upload is not supported by this storage');
+    const wanted = [...new Set(partNumbers)].slice(0, mp.presignParts ? MAX_PARTS : 100);
+    for (const n of wanted) if (expectedPartSize(session, n) < 0) throw badRequest(`Invalid part number ${n}`);
     const out: Record<number, PresignedRequest> = {};
-    for (const n of partNumbers.slice(0, 100)) {
-      if (expectedPartSize(session, n) < 0) throw badRequest(`Invalid part number ${n}`);
-      out[n] = await driver.multipart.presignPart(session.object_key, session.upstream_upload_id!, n, expiresIn);
+    let uploaded: number[] | undefined;
+    let reset = false;
+    if (driver.capabilities.sequentialParts && mp.listParts) {
+      // session-style uploads: tell the browser which parts the provider already received (lost acks / resume)
+      const have = await this.reconcile(session, parts);
+      uploaded = have.map((p) => p.part_number);
     }
-    return out;
+    const todo = wanted.filter((n) => !uploaded?.includes(n));
+    if (mp.presignParts) {
+      const r = await mp.presignParts(session.object_key, session.upstream_upload_id!, todo, expiresIn);
+      Object.assign(out, r.urls);
+      if (r.uploadId && r.uploadId !== session.upstream_upload_id) {
+        await this.env.DB.prepare('UPDATE upload_sessions SET upstream_upload_id = ?, updated_at = ? WHERE id = ?').bind(r.uploadId, Date.now(), id).run();
+        session.upstream_upload_id = r.uploadId;
+      }
+      if (r.restarted) {
+        await this.env.DB.prepare('DELETE FROM upload_parts WHERE session_id = ?').bind(id).run();
+        reset = true;
+      }
+      if (r.alreadyComplete) {
+        for (let n = 1; n <= session.total_parts; n++) await this.recordPart(session, n, 'lfs-exists', expectedPartSize(session, n));
+        uploaded = Array.from({ length: session.total_parts }, (_, i) => i + 1);
+      }
+    } else {
+      for (const n of todo) out[n] = await mp.presignPart!(session.object_key, session.upstream_upload_id!, n, expiresIn);
+    }
+    return { urls: out, ...(uploaded ? { uploaded } : {}), ...(reset ? { reset } : {}) };
   }
 
   /**
@@ -321,6 +371,7 @@ export class UploadService {
     if (missing.length) throw badRequest(`Missing parts: ${missing.slice(0, 20).join(', ')}${missing.length > 20 ? '…' : ''}`);
     const { driver } = this.storageOf(session);
     let checksum: string | null = null;
+    let driverChecksum: string | null = null;
     if (session.mode === 'native') {
       let list = parts.map((p) => ({ partNumber: p.part_number, etag: p.etag ?? '' }));
       if (list.some((p) => !p.etag) && driver.multipart?.listParts) {
@@ -329,9 +380,12 @@ export class UploadService {
         const map = new Map(upstream.map((p) => [p.partNumber, p.etag]));
         list = list.map((p) => ({ partNumber: p.partNumber, etag: p.etag || map.get(p.partNumber) || '' }));
       }
+      // session-style providers (OneDrive / Google Drive) have no per-part ETag
+      if (driver.capabilities.sequentialParts) list = list.map((p) => ({ ...p, etag: p.etag || `seq-${p.partNumber}` }));
       if (list.some((p) => !p.etag)) throw badRequest('Some parts have no ETag; expose the ETag header in bucket CORS');
       try {
-        await driver.multipart!.complete(session.object_key, session.upstream_upload_id!, list);
+        const r = await driver.multipart!.complete(session.object_key, session.upstream_upload_id!, list);
+        if (r && r.checksum) driverChecksum = r.checksum;
       } catch (e) {
         rethrowUpstream(e, 'Complete multipart upload');
       }
@@ -390,6 +444,7 @@ export class UploadService {
         const actual = st?.etag?.replace(/"/g, '');
         if (actual && /^[0-9a-f]{32}-\d+$/.test(actual) && actual !== expectedEtag) throw new HttpError(500, `Final ETag ${actual} != expected ${expectedEtag}`, 'integrity');
       }
+      if (driverChecksum) checksum = driverChecksum;
     }
     const now = Date.now();
     await this.env.DB.batch([

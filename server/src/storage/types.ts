@@ -54,6 +54,8 @@ export interface PresignedRequest {
   method: 'PUT' | 'GET';
   headers: Record<string, string>;
   expiresIn: number;
+  /** extra non-2xx statuses that mean "accepted" (Google Drive resumable: 308 Resume Incomplete) */
+  okStatus?: number[];
 }
 
 export interface UploadedPart {
@@ -70,13 +72,50 @@ export interface PendingUpstreamUpload {
   initiated?: number;
 }
 
+export interface MultipartCreateOptions {
+  contentType?: string;
+  size?: number;
+  partSize?: number;
+  /** SHA-256 (hex) of the whole file, computed by the browser (HuggingFace LFS oid) */
+  sha256?: string;
+  /** base64 of the first 512 bytes (HuggingFace preupload sample) */
+  sample?: string;
+  /** browser origin the session will be used from (Google Drive resumable sessions + CORS) */
+  origin?: string;
+}
+
+/** Richer create() result for providers that dictate the part layout (HuggingFace LFS multipart). */
+export interface MultipartCreated {
+  uploadId: string;
+  /** provider-chosen part size (overrides EdgeDock's choice) */
+  partSize?: number;
+  totalParts?: number;
+  /** parts the provider already holds (e.g. the LFS object already exists) */
+  uploadedParts?: UploadedPart[];
+  /** stored with the session (e.g. "sha256:<oid>"); used to refuse resuming a different file */
+  checksum?: string;
+}
+
+export interface PresignedParts {
+  urls: Record<number, PresignedRequest>;
+  /** updated upload id (fresh completion URL etc.); persisted by the upload service */
+  uploadId?: string;
+  /** the provider started a new upload: every recorded part must be uploaded again */
+  restarted?: boolean;
+  /** the provider already has the whole object: all parts count as uploaded */
+  alreadyComplete?: boolean;
+}
+
 export interface MultipartSupport {
   /** size / partSize are known when the session is created (needed by OneDrive / Google Drive sessions) */
-  create(path: string, opts: { contentType?: string; size?: number; partSize?: number }): Promise<string>;
+  create(path: string, opts: MultipartCreateOptions): Promise<string | MultipartCreated>;
   presignPart?(path: string, uploadId: string, partNumber: number, expiresIn: number): Promise<PresignedRequest>;
+  /** sign many parts with one provider call (HuggingFace: one LFS batch request returns every part URL) */
+  presignParts?(path: string, uploadId: string, partNumbers: number[], expiresIn: number): Promise<PresignedParts>;
   /** `md5` (base64) is forwarded as Content-MD5 where the provider verifies it. */
   uploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number, opts?: { md5?: string }): Promise<{ etag: string }>;
-  complete(path: string, uploadId: string, parts: UploadedPart[]): Promise<void>;
+  /** may return the final checksum to record (e.g. "sha256:<oid>") */
+  complete(path: string, uploadId: string, parts: UploadedPart[]): Promise<void | { checksum?: string }>;
   abort(path: string, uploadId: string): Promise<void>;
   listParts?(path: string, uploadId: string): Promise<UploadedPart[]>;
   /** In-progress uploads under the driver root (orphan cleanup). Keys are storage-relative paths. */
@@ -96,8 +135,14 @@ export interface DriverCapabilities {
   partSizeMultiple?: number;
   /** parts must arrive strictly in order (upload sessions): the browser uploads one at a time */
   sequentialParts?: boolean;
-  /** largest file that can be written at all through EdgeDock (e.g. HuggingFace: one request) */
+  /** largest file that can be written at all through EdgeDock */
   maxUploadSize?: number;
+  /** the browser can PUT parts straight to the provider (multipart.presignPart/presignParts) without `presign` */
+  directParts?: boolean;
+  /** multipart.create needs the SHA-256 of the whole file (HuggingFace LFS) */
+  needsSha256?: boolean;
+  /** single-request writes (driver.write: proxy PUT, WebDAV, copy) are buffered up to this many bytes */
+  maxWriteSize?: number;
 }
 
 export interface StorageDriver {

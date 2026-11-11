@@ -5,7 +5,10 @@
  *     to 2 and remembers it for that storage (localStorage), so later uploads skip the failing try
  *  2. single streaming PUT through the Worker (small files only: always below the Worker body limit)
  *  3. chunked multipart for anything larger: resumable (D1 session + IndexedDB), per-part retry with
- *     backoff, adaptive concurrency, pause/resume, auto-pause while offline
+ *     backoff, adaptive concurrency, pause/resume, auto-pause while offline. Parts go straight to the
+ *     provider when it allows it (S3 presigned parts, HuggingFace LFS part URLs, OneDrive / Google Drive
+ *     session URLs), otherwise through the Worker. HuggingFace first needs the file's SHA-256
+ *     (計算雜湊中, in a Web Worker; kept in IndexedDB so a resume skips it).
  */
 import { reactive } from 'vue';
 import { api, apiUrl, authHeaders } from './api';
@@ -13,8 +16,9 @@ import { CanceledError, fingerprintFile, putWithRetry, UploadControl, UploadErro
 import { joinPath } from './format';
 import { t } from './i18n';
 import { deleteUpload, listUploads, putUpload, type PersistedUpload } from './idb';
+import { sha256File } from './sha256';
 
-export type UploadStatus = 'queued' | 'uploading' | 'paused' | 'offline' | 'retrying' | 'done' | 'error' | 'canceled';
+export type UploadStatus = 'queued' | 'hashing' | 'uploading' | 'paused' | 'offline' | 'retrying' | 'done' | 'error' | 'canceled';
 
 export interface UploadTask {
   id: string;
@@ -32,6 +36,10 @@ export interface UploadTask {
   resumed?: boolean;
   file: File;
   fingerprint?: string;
+  /** SHA-256 of the file (HuggingFace LFS oid) */
+  sha256?: string;
+  /** hashing progress 0..1 */
+  hashed?: number;
 }
 
 /** controls live outside the reactive store (AbortController etc. must not be proxied) */
@@ -195,7 +203,7 @@ export function clearFinished() {
 }
 
 function pump() {
-  const busy = uploads.tasks.filter((t) => ['uploading', 'paused', 'offline', 'retrying'].includes(t.status)).length;
+  const busy = uploads.tasks.filter((t) => ['hashing', 'uploading', 'paused', 'offline', 'retrying'].includes(t.status)).length;
   const next = uploads.tasks.filter((t) => t.status === 'queued').reverse();
   for (const t of next.slice(0, Math.max(0, uploads.concurrency - busy))) void run(t);
 }
@@ -262,9 +270,17 @@ async function run(task: UploadTask) {
     if (plan.strategy === 'multipart') {
       const fingerprint = await fingerprintFile(task.file);
       task.fingerprint = fingerprint;
+      if (plan.sha256 && !task.sha256) {
+        const saved = (await listUploads()).find((p) => p.fingerprint === fingerprint && p.sha256);
+        task.sha256 = saved?.sha256 ?? (await hashTask(task, ctl));
+        if (ctl.canceled) throw new CanceledError();
+        task.status = 'uploading';
+        task.startedAt = Date.now();
+      }
       const res = await uploadMultipart(task.file, task.path, {
         ...engineOpts,
         fingerprint,
+        sha256: plan.sha256 ? task.sha256 : undefined,
         direct: !!plan.direct && !directBroken,
         onDirectFailed: () => {
           markDirectBroken(plan.storageId);
@@ -311,6 +327,21 @@ async function run(task: UploadTask) {
   }
 }
 
+/** SHA-256 of the whole file with progress (status "hashing" / 計算雜湊中). */
+async function hashTask(task: UploadTask, ctl: UploadControl): Promise<string> {
+  task.status = 'hashing';
+  task.strategy = '計算雜湊中（SHA-256）';
+  task.hashed = 0;
+  const hex = await sha256File(task.file, {
+    signal: ctl.signal,
+    onProgress: (done, total) => {
+      task.hashed = total ? done / total : 1;
+    },
+  });
+  task.hashed = 1;
+  return hex;
+}
+
 async function proxy(task: UploadTask, o: Parameters<typeof putWithRetry>[3]) {
   await putWithRetry(apiUrl(`/api/upload/proxy?path=${encodeURIComponent(task.path)}`), task.file, { ...authHeaders(), 'content-type': task.file.type || 'application/octet-stream' }, o);
 }
@@ -334,6 +365,7 @@ async function persist(task: UploadTask, sessionId: string, partSize: number, to
     totalParts,
     uploadedParts,
     updatedAt: now,
+    sha256: task.sha256,
   });
 }
 
@@ -359,6 +391,7 @@ export async function resumePending(p: PersistedUpload, file: File): Promise<boo
   if (fp !== p.fingerprint) return false;
   const t = addTask(file, p.path);
   t.fingerprint = fp;
+  if (p.sha256) t.sha256 = p.sha256;
   pump();
   return true;
 }

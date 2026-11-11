@@ -261,8 +261,9 @@ describe('HuggingFace driver', () => {
     expect((await d.stat('/data/v2/train.bin'))?.size).toBe(bin.length);
     await d.delete('/data');
     expect(await d.stat('/data/a.txt')).toBeNull();
-    expect(d.capabilities.maxUploadSize).toBe(50 * MiB);
-    await expect(d.write('/huge.bin', new Uint8Array(1), { size: 51 * MiB })).rejects.toMatchObject({ status: 413 });
+    expect(d.capabilities.maxUploadSize).toBe(50 * 1024 * MiB);
+    expect(d.capabilities.maxWriteSize).toBe(100 * MiB);
+    await expect(d.write('/huge.bin', new Uint8Array(1), { size: 101 * MiB })).rejects.toMatchObject({ status: 413 });
   });
 
   it('writes need a token', async () => {

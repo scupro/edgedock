@@ -12,6 +12,8 @@
  *  - integrity: MD5 per part (Content-MD5; checked by S3 natively, by the Worker for emulated parts,
  *    against the part ETag for direct uploads); final size/ETag verified on complete
  *  - direct presigned uploads fall back to the Worker proxy when the bucket has no CORS
+ *  - direct part URLs are signed in batches (HuggingFace: one LFS batch call returns every part URL),
+ *    cached, and re-signed when the provider says they expired (403 / "expired")
  */
 import { Md5, toBase64, toHex } from './md5';
 
@@ -131,6 +133,32 @@ export interface SessionInfo {
   resumed: boolean;
   /** provider needs parts in order (OneDrive / Google Drive upload sessions) */
   sequential?: boolean;
+  /** how many part URLs to request per sign call */
+  signBatch?: number;
+}
+
+interface SignedPart {
+  url: string;
+  headers?: Record<string, string>;
+  okStatus?: number[];
+}
+
+interface SignResponse {
+  urls: Record<number, SignedPart>;
+  /** parts the provider already holds */
+  uploaded?: number[];
+  /** the provider restarted the upload: recorded parts were dropped server-side */
+  reset?: boolean;
+}
+
+/** A direct PUT failed because its presigned URL is no longer valid. */
+function isExpired(r: PutResult): boolean {
+  return r.status === 403 || ((r.status === 400 || r.status === 401) && /expired|ExpiredToken|AccessDenied/i.test(r.text));
+}
+
+/** base64 of a Blob's first bytes (HuggingFace preupload sample). */
+export async function sampleOf(file: Blob, n = 512): Promise<string> {
+  return toBase64(new Uint8Array(await file.slice(0, n).arrayBuffer()));
 }
 
 const RETRIABLE_STATUS = new Set([0, -2, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
@@ -193,7 +221,7 @@ export async function md5OfBlob(b: Blob): Promise<{ hex: string; b64: string }> 
 export async function uploadMultipart(
   file: Blob & { name?: string; lastModified?: number; type?: string },
   path: string,
-  opts: EngineOptions & { fingerprint?: string; direct?: boolean },
+  opts: EngineOptions & { fingerprint?: string; direct?: boolean; sha256?: string },
 ): Promise<{ ok: boolean; path: string; size: number; checksum?: string | null; session: SessionInfo }> {
   const T = opts.transport;
   const ctl = opts.control ?? new UploadControl();
@@ -237,13 +265,47 @@ export async function uploadMultipart(
     }
   };
 
+  const lfs = opts.sha256 ? { sha256: opts.sha256, sample: await sampleOf(file) } : {};
   const s = await apiRetry(() =>
     T.api<SessionInfo & { limits?: { concurrency?: number } }>('/api/upload/multipart/init', {
-      body: { path, size: file.size, contentType: file.type || undefined, fingerprint },
+      body: { path, size: file.size, contentType: file.type || undefined, fingerprint, ...lfs },
     }),
   );
   opts.onSession?.(s);
   const done = new Set<number>(s.uploadedParts);
+  const signBatch = Math.max(1, s.signBatch ?? 1);
+  const signed = new Map<number, SignedPart>();
+  let signing: Promise<void> | null = null;
+  /** fetch (batched) direct URLs until part n has one, or the server says it is already uploaded */
+  const signFor = async (n: number): Promise<SignedPart | 'done'> => {
+    for (let i = 0; i < 3; i++) {
+      if (done.has(n)) return 'done';
+      const hit = signed.get(n);
+      if (hit) return hit;
+      if (!signing) {
+        const want = [n];
+        for (let k = n + 1; k <= s.totalParts && want.length < signBatch; k++) if (!done.has(k) && !signed.has(k)) want.push(k);
+        signing = (async () => {
+          const r = await T.api<SignResponse>(`/api/upload/multipart/${s.id}/sign`, { body: { partNumbers: want } });
+          if (r.reset) {
+            // parts recorded so far belong to an upload the provider dropped; the completion check re-sends them
+            done.clear();
+            signed.clear();
+          }
+          for (const u of r.uploaded ?? []) done.add(u);
+          for (const [k, v] of Object.entries(r.urls ?? {})) signed.set(Number(k), v);
+          if (r.uploaded?.length) report();
+        })().finally(() => {
+          signing = null;
+        });
+      }
+      await signing;
+    }
+    if (done.has(n)) return 'done';
+    const hit = signed.get(n);
+    if (hit) return hit;
+    throw Object.assign(new Error(`No upload URL for part ${n}`), { status: 502 });
+  };
   const partLen = (n: number) => (n < s.totalParts ? s.partSize : file.size - s.partSize * (s.totalParts - 1));
   const inflight = new Map<number, number>();
   const report = () => {
@@ -276,28 +338,39 @@ export async function uploadMultipart(
       report();
     };
     if (useDirect) {
-      let signed: { url: string; headers?: Record<string, string> };
+      let target: SignedPart | 'done';
       try {
-        const r = await T.api<{ urls: Record<number, { url: string; headers?: Record<string, string> }> }>(`/api/upload/multipart/${s.id}/sign`, { body: { partNumbers: [n] } });
-        signed = r.urls[n];
+        target = await signFor(n);
       } catch (e) {
         const st = (e as { status?: number }).status ?? 0;
         return new UploadError((e as Error).message, 'http', st, RETRIABLE_STATUS.has(st));
       }
-      const r = await T.put(signed.url, blob, signed.headers ?? {}, { onProgress, signal: ctl.signal, timeoutMs });
-      const err = classify(r);
+      if (target === 'done') return null;
+      const r = await T.put(target.url, blob, target.headers ?? {}, { onProgress, signal: ctl.signal, timeoutMs });
+      const accepted = target.okStatus?.includes(r.status) ?? false;
+      const err = accepted ? null : classify(r);
       if (err) {
+        // never reuse a URL that failed: the next attempt signs again (fresh URL / provider state re-checked)
+        signed.delete(n);
         if (err.status === 0 && !directWorked && (!T.isOnline || T.isOnline())) {
           // first direct PUT failed at the network level while online → bucket CORS. Proxy from now on.
+          if (useDirect) opts.onDirectFailed?.();
           useDirect = false;
-          opts.onDirectFailed?.();
           return new UploadError('Bucket CORS blocked direct upload; switching to Worker proxy', 'cors', 0, true);
+        }
+        if (isExpired(r)) {
+          // presigned URLs expired (e.g. long pause / resume next day): drop them all and re-sign
+          signed.clear();
+          return new UploadError(`Part ${n}: upload URL expired, re-signing`, 'http', r.status, true);
         }
         return err;
       }
       directWorked = true;
       const etag = r.etag?.replace(/"/g, '').toLowerCase() ?? null;
-      if (sum && etag && /^[0-9a-f]{32}$/.test(etag) && etag !== sum.hex) return new UploadError(`Part ${n} checksum mismatch`, 'checksum', 422, true);
+      if (sum && etag && /^[0-9a-f]{32}$/.test(etag) && etag !== sum.hex) {
+        signed.delete(n);
+        return new UploadError(`Part ${n} checksum mismatch`, 'checksum', 422, true);
+      }
       try {
         await T.api(`/api/upload/multipart/${s.id}/parts/${n}/ack`, { body: { etag: r.etag, size: blob.size, md5: sum?.hex } });
       } catch (e) {
@@ -313,6 +386,7 @@ export async function uploadMultipart(
   };
 
   const uploadOne = async (n: number) => {
+    if (done.has(n)) return;
     const start = (n - 1) * s.partSize;
     const blob = file.slice(start, start + partLen(n));
     const sum = wantSum ? await md5OfBlob(blob) : null;

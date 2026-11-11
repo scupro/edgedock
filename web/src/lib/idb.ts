@@ -14,6 +14,8 @@ export interface PersistedUpload {
   totalParts: number;
   uploadedParts: number[];
   updatedAt: number;
+  /** SHA-256 of the whole file (HuggingFace LFS), so a resume does not hash again */
+  sha256?: string;
 }
 
 let dbp: Promise<IDBDatabase | null> | null = null;

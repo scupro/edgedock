@@ -12,7 +12,7 @@ const refreshPending = async () => (pending.value = await pendingUploads());
 onMounted(refreshPending);
 
 const visible = computed(() => uploads.tasks.length > 0 || pending.value.length > 0);
-const isActive = (x: UploadTask) => ['uploading', 'queued', 'paused', 'offline', 'retrying'].includes(x.status);
+const isActive = (x: UploadTask) => ['hashing', 'uploading', 'queued', 'paused', 'offline', 'retrying'].includes(x.status);
 const active = computed(() => uploads.tasks.filter(isActive).length);
 watch(
   () => uploads.tasks.filter(isActive).length,
@@ -74,9 +74,11 @@ async function onPicked(e: Event) {
           <span class="mono" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="task.path">{{ task.path }}</span>
           <span class="badge" :class="{ danger: task.status === 'error', warn: ['canceled', 'paused', 'offline', 'retrying'].includes(task.status) }">{{ t(`upload.status.${task.status}` as any) }}</span>
         </div>
-        <div class="progress"><div :style="{ width: pct(task.loaded, task.size) + '%' }" /></div>
+        <div v-if="task.status === 'hashing'" class="progress"><div :style="{ width: Math.round((task.hashed ?? 0) * 100) + '%', opacity: 0.6 }" /></div>
+        <div v-else class="progress"><div :style="{ width: pct(task.loaded, task.size) + '%' }" /></div>
         <div class="row muted" style="flex-wrap: wrap">
-          <span>{{ formatSize(task.loaded) }} / {{ formatSize(task.size) }}</span>
+          <span v-if="task.status === 'hashing'">{{ t('upload.status.hashing') }} {{ Math.round((task.hashed ?? 0) * 100) }}%</span>
+          <span v-else>{{ formatSize(task.loaded) }} / {{ formatSize(task.size) }}</span>
           <span v-if="task.speed && task.status === 'uploading'">· {{ formatSize(task.speed) }}/s</span>
           <span v-if="task.eta && task.status === 'uploading'">· {{ t('upload.eta', { t: fmtEta(task.eta) }) }}</span>
           <span v-if="task.retries">· {{ t('upload.retries', { n: task.retries }) }}</span>

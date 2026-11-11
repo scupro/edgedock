@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * In-memory fakes of the provider HTTP APIs used by the Phase 2 drivers (mocked fetch).
  * Each fake records calls and supports a few injected faults (429, 401, expired URLs).
@@ -401,10 +402,28 @@ export function discordFake() {
 }
 
 // ---------------------------------------------------------------- HuggingFace Hub
-export function hfFake(repo = 'me/data', kind = 'datasets') {
+export interface HfMultipartState {
+  /** objects larger than this use the S3 multipart transfer (chunk_size); 0 = always basic */
+  chunkSize: number;
+  /** bump to expire every presigned URL handed out so far */
+  gen: number;
+  /** bump to make the next batch start a new S3 multipart upload */
+  uploadSeq: number;
+  /** uploaded parts per S3 upload id */
+  uploads: Map<string, { oid: string; size: number; parts: Map<number, { data: Uint8Array; etag: string }> }>;
+  /** part number → remaining injected 500 responses */
+  partFailures: Map<number, number>;
+  partPuts: string[];
+  completions: { oid: string; parts: { partNumber: number; etag: string }[] }[];
+  batches: number;
+}
+
+export function hfFake(repo = 'me/data', kind = 'datasets', mpOpts: { chunkSize?: number } = {}) {
   const files = new Map<string, { data: Uint8Array; lfs?: string }>();
   const lfsStore = new Map<string, Uint8Array>();
   const calls: string[] = [];
+  const mp: HfMultipartState = { chunkSize: mpOpts.chunkSize ?? 0, gen: 1, uploadSeq: 1, uploads: new Map(), partFailures: new Map(), partPuts: [], completions: [], batches: 0 };
+  const md5hex = (b: Uint8Array) => createHash('md5').update(b).digest('hex');
   const commits: { summary: string; ops: { key: string; value: Record<string, unknown> }[] }[] = [];
   const sha256 = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b as BufferSource))].map((x) => x.toString(16).padStart(2, '0')).join('');
   const entry = (p: string) => {
@@ -425,6 +444,51 @@ export function hfFake(repo = 'me/data', kind = 'datasets') {
     if (u.host === 'cdn.fake') {
       const f = files.get(decodeURIComponent(u.pathname.slice(1)));
       return f ? rangeResponse(f.data, req.headers.get('range')) : new Response('', { status: 404 });
+    }
+    if (u.host === 's3.fake') {
+      // presigned S3 part URL: /<oid>?uploadId=..&partNumber=..&gen=..
+      const uid = u.searchParams.get('uploadId')!;
+      const n = Number(u.searchParams.get('partNumber'));
+      if (Number(u.searchParams.get('gen')) !== mp.gen) return new Response('<Error><Code>AccessDenied</Code><Message>Request has expired</Message></Error>', { status: 403 });
+      const up = mp.uploads.get(uid);
+      if (!up) return new Response('<Error><Code>NoSuchUpload</Code></Error>', { status: 404 });
+      const left = mp.partFailures.get(n) ?? 0;
+      if (left > 0) {
+        mp.partFailures.set(n, left - 1);
+        await req.arrayBuffer();
+        return new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
+      }
+      const data = new Uint8Array(await req.arrayBuffer());
+      const etag = md5hex(data);
+      up.parts.set(n, { data, etag });
+      mp.partPuts.push(`${uid}:${n}`);
+      return new Response(null, { status: 200, headers: { etag: `"${etag}"` } });
+    }
+    if (u.host === 'huggingface.co' && u.pathname === '/api/complete_multipart') {
+      const uid = u.searchParams.get('uploadId')!;
+      if (Number(u.searchParams.get('gen')) !== mp.gen) return json({ error: 'expired' }, 403);
+      const up = mp.uploads.get(uid);
+      if (!up) return json({ error: 'no such upload' }, 404);
+      const b = (await req.json()) as { oid: string; parts: { partNumber: number; etag: string }[] };
+      mp.completions.push(b);
+      const total = Math.ceil(up.size / mp.chunkSize);
+      if (b.parts.length !== total) return json({ error: `expected ${total} parts` }, 400);
+      const chunks: Uint8Array[] = [];
+      for (const p of [...b.parts].sort((x, y) => x.partNumber - y.partNumber)) {
+        const got = up.parts.get(p.partNumber);
+        if (!got || got.etag !== p.etag.replace(/"/g, '')) return json({ error: `bad etag for part ${p.partNumber}` }, 400);
+        chunks.push(got.data);
+      }
+      const all = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+      let off = 0;
+      for (const c of chunks) {
+        all.set(c, off);
+        off += c.length;
+      }
+      if (all.length !== up.size || (await sha256(all)) !== b.oid) return json({ error: 'sha256 mismatch' }, 400);
+      lfsStore.set(b.oid, all);
+      mp.uploads.delete(uid);
+      return json({ ok: true });
     }
     if (u.host === 'lfs.fake') {
       const oid = u.pathname.slice(1);
@@ -453,8 +517,28 @@ export function hfFake(repo = 'me/data', kind = 'datasets') {
       return json({ files: b.files.map((f) => ({ path: f.path, uploadMode: f.path.endsWith('.bin') ? 'lfs' : 'regular' })) });
     }
     if (p === `/${kind}/${repo}.git/info/lfs/objects/batch`) {
-      const b = (await req.json()) as { objects: { oid: string; size: number }[] };
-      return json({ transfer: 'basic', objects: b.objects.map((o) => (lfsStore.has(o.oid) ? { ...o } : { ...o, actions: { upload: { href: `https://lfs.fake/${o.oid}`, header: {} } } })) });
+      mp.batches++;
+      const b = (await req.json()) as { objects: { oid: string; size: number }[]; transfers: string[]; hash_algo: string; ref?: { name: string } };
+      if (req.headers.get('accept') !== 'application/vnd.git-lfs+json' || b.hash_algo !== 'sha_256' || !b.transfers.includes('multipart')) return json({ error: 'bad batch request' }, 400);
+      return json({
+        transfer: 'basic',
+        objects: b.objects.map((o) => {
+          if (lfsStore.has(o.oid)) return { ...o };
+          if (mp.chunkSize && o.size > mp.chunkSize) {
+            // one S3 multipart upload per object (re-used by later batch calls until uploadSeq changes)
+            let uid = [...mp.uploads.entries()].find(([k, v]) => v.oid === o.oid && k.endsWith(`-${mp.uploadSeq}`))?.[0];
+            if (!uid) {
+              uid = `U${o.oid.slice(0, 6)}-${mp.uploadSeq}`;
+              mp.uploads.set(uid, { oid: o.oid, size: o.size, parts: new Map() });
+            }
+            const header: Record<string, string> = { chunk_size: String(mp.chunkSize) };
+            const n = Math.ceil(o.size / mp.chunkSize);
+            for (let i = 1; i <= n; i++) header[String(i).padStart(5, '0')] = `https://s3.fake/${o.oid}?uploadId=${uid}&partNumber=${i}&gen=${mp.gen}`;
+            return { ...o, actions: { upload: { href: `https://huggingface.co/api/complete_multipart?uploadId=${uid}&gen=${mp.gen}`, header } } };
+          }
+          return { ...o, actions: { upload: { href: `https://lfs.fake/${o.oid}`, header: {} } } };
+        }),
+      });
     }
     if (p === `${api}/commit/main`) {
       if (req.headers.get('authorization') !== 'Bearer HFTOKEN') return json({ error: 'unauthorized' }, 401);
@@ -480,7 +564,7 @@ export function hfFake(repo = 'me/data', kind = 'datasets') {
     }
     return json({ error: `unhandled ${req.method} ${p}` }, 500);
   }, calls);
-  return { fetch, calls, files, lfsStore, commits };
+  return { fetch, calls, files, lfsStore, commits, mp };
 }
 
 // ---------------------------------------------------------------- GitHub

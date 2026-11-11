@@ -15,6 +15,7 @@
     "docx": "^9.5.1",
     "docx-preview": "^0.3.7",
     "epubjs": "^0.3.93",
+    "hash-wasm": "^4.13.0",
     "highlight.js": "^11.11.1",
     "html-to-image": "^1.11.13",
     "html2pdf.js": "^0.14.0",

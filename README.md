@@ -271,7 +271,16 @@ docker compose up -d --build
 
 1. [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 建立 Token：只瀏覽用 `read`；要上傳請用 `write` 或細粒度 Token 並勾選該 repo 的寫入權限。
 2. 僅支援 **Dataset** repo：填 Dataset Repo（`使用者/名稱`）與分支。
-3. 每次上傳／刪除／移動都是一次 commit；Hub 要求放 LFS 的檔案（大型二進位檔）會自動經由 Git LFS 上傳，LFS 檔案的移動只改指標不重新上傳。每個檔案以單一請求上傳，大小上限為「上傳大小上限」（預設 50 MiB）且不超過 Worker 代理上限，更大的檔案請用 `huggingface-cli upload`。
+3. 每次上傳／刪除／移動都是一次 commit；Hub 要求放 LFS 的檔案（大型二進位檔）會自動經由 Git LFS 上傳，LFS 檔案的移動只改指標不重新上傳。
+4. **大檔上傳（≥ 2 GB 也可以）**：流程與官方 [huggingface.js](https://github.com/huggingface/huggingface.js)（`commit()`）及 `huggingface_hub` 相同：
+   1. 瀏覽器在 Web Worker 中以 hash-wasm 分塊串流計算整個檔案的 SHA-256（上傳面板顯示「計算雜湊中」）；結果存在 IndexedDB，續傳時不必重算。
+   2. 伺服器呼叫 `preupload` 確認此檔走 LFS，再向 `…/datasets/<repo>.git/info/lfs/objects/batch` 要上傳方式（`transfers: ["basic","multipart"]`、`hash_algo: "sha_256"`）。Hub 上已有相同內容（同 oid）時直接略過上傳、只做 commit。
+   3. 多段上傳（`chunk_size`）：Hub 回傳每一段的 presigned URL，瀏覽器**直接 PUT 到 Hub 的 S3／CDN**，不經過 Worker（一次 batch 取得所有分段網址）；每段有重試、退避、逾時、暫停／繼續與離線等待，並以 ETag 核對每段 MD5。URL 過期（403）時會重新 batch 取得新網址，只傳剩下的分段。
+   4. 若瀏覽器無法直連（CORS／網路類錯誤），會改由 Worker 串流轉送該分段（受 Worker 代理上限限制），並記住此儲存空間之後都走 Worker。
+   5. 全部分段完成後，伺服器把 `{oid, parts:[{partNumber, etag}]}` 送到完成網址，再以 `lfsFile` commit。
+   6. 續傳：工作階段（oid、大小、分段大小、已完成分段與 ETag）存在 D1 與瀏覽器 IndexedDB；重新整理後重新選擇同一個檔案，核對指紋與 SHA-256 後只上傳缺少的分段。若 Hub 已改開新的多段上傳，會自動重傳全部分段。
+5. **上限**：「上傳大小上限」預設 51200 MiB（50 GiB），可自行調整；Hub 不接受超過 50 GB 的 LFS 檔案，並建議單檔維持在約 20 GB 以下、單一 repo 不要放太多檔案。小檔（低於分段門檻）仍經 Worker 單一請求上傳：文字等一般檔案直接 inline commit，二進位檔走 LFS basic 傳輸。
+6. **WebDAV PUT 與伺服器端複製**到 HuggingFace 仍是經 Worker 的單一請求，會先暫存在記憶體，上限 100 MiB（也受 Workers 請求本體 100 MB 限制）；大檔請用網頁上傳或 `huggingface-cli upload`。
 
 ### GitHub（唯讀）
 
@@ -313,7 +322,7 @@ WebDAV 端點：`https://你的網域/dav/`
 - **OneDrive / Google Drive**：上傳工作階段必須依序上傳，因此每個檔案只用 1 個並行分段；OneDrive 工作階段約數天後過期、Google 約 1 週。Google 文件／試算表／簡報（原生格式）無法直接下載。
 - **Telegram**：官方 Bot API 單一分段 ≤ 20 MB；Bot 在私人對話只能刪除 48 小時內的訊息（請使用頻道）；刪除儲存空間不會刪除頻道內的訊息。
 - **Discord**：每段 ≤ 10 MiB（未加成伺服器）；大量上傳會觸發速率限制（已自動退避，但速度有限）；刪除儲存空間不會刪除訊息。Telegram / Discord 的目錄結構只存在 D1，請定期備份 D1。
-- **HuggingFace**：每次寫入都是一個 commit，不支援分段續傳；單檔上限見上方說明。Hub 也有 commit 頻率限制。
+- **HuggingFace**：僅支援 Dataset repo；每次寫入都是一個 commit（Hub 有 commit 頻率限制）。網頁上傳大檔會分段直傳、可續傳，但需先在瀏覽器計算整檔 SHA-256（數 GB 的檔案需要一些時間）；WebDAV PUT 單檔上限 100 MiB。
 - **GitHub**：唯讀；Contents API 單一目錄最多回傳 1000 個項目、單檔 100 MB；Git LFS 檔案只會讀到指標檔；Releases 最多列出 1000 個。
 - **驅動測試**：各雲端驅動以模擬的 API（mocked fetch）測試，請在正式使用前以自己的帳號做一次「測試連線」與小檔上傳。
 
