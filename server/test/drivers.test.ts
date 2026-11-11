@@ -240,7 +240,7 @@ describe('Discord driver', () => {
 describe('HuggingFace driver', () => {
   it('lists with pagination, reads with Range through the CDN redirect, commits regular + LFS files, moves LFS by oid', async () => {
     const f = hfFake();
-    const d = new HuggingFaceDriver({ repoId: 'me/data', repoType: 'dataset', token: 'HFTOKEN' }, { fetch: f.fetch });
+    const d = new HuggingFaceDriver({ repoId: 'me/data', token: 'HFTOKEN' }, { fetch: f.fetch });
     await d.write('/README.md', '# data', { size: 6 });
     const bin = bytes(300_000, 4);
     await d.write('/data/train.bin', bin, { size: bin.length });
@@ -267,7 +267,7 @@ describe('HuggingFace driver', () => {
 
   it('writes need a token', async () => {
     const f = hfFake();
-    const d = new HuggingFaceDriver({ repoId: 'me/data', repoType: 'dataset' }, { fetch: f.fetch });
+    const d = new HuggingFaceDriver({ repoId: 'me/data' }, { fetch: f.fetch });
     await expect(d.write('/x.txt', 'x', { size: 1 })).rejects.toMatchObject({ status: 401 });
   });
 });

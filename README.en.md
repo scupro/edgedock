@@ -10,7 +10,7 @@ The Chinese README is the primary, more detailed document.
 
 ## Features
 
-- Storage mounts: S3-compatible (R2, B2, AWS S3, OSS, COS, MinIO…), WebDAV, OneDrive / SharePoint, Google Drive, Telegram, Discord, HuggingFace Hub, GitHub (read-only), local folders (Node/Docker only). Credentials and OAuth tokens are AES-GCM encrypted at rest.
+- Storage mounts: S3-compatible (R2, B2, AWS S3, OSS, COS, MinIO…), WebDAV, OneDrive / SharePoint, Google Drive, Telegram, Discord, HuggingFace Dataset, GitHub (read-only), local folders (Node/Docker only). Credentials and OAuth tokens are AES-GCM encrypted at rest.
 - File operations, filename search (scheduled index).
 - Reliable uploads: presigned direct PUT (with automatic proxy fallback on CORS errors) → small streaming PUTs through the Worker → chunked, resumable multipart for everything else, with per-part retry, MD5 checks and resume after reload.
 - Previews: images, video, audio, PDF, DOCX, spreadsheets, Markdown, JSON, EPUB, ~80 code languages, plain text, plus a configurable external previewer. See [`web/src/lib/fileTypes.ts`](./web/src/lib/fileTypes.ts).
@@ -77,7 +77,7 @@ The Chinese README is the primary, more detailed document.
 - **Google Drive:** Cloud Console → enable *Google Drive API* → OAuth client (Web) with redirect URI `https://your-host/api/oauth/gdrive/callback` → enter Client ID / secret → **Authorize** (publish the consent screen to avoid 7-day refresh tokens). Or paste a **service account** JSON key and share a folder / shared drive with the service account; set its id as *Root folder ID*.
 - **Telegram:** create a bot with @BotFather, make it admin of a private channel (post + delete), use the chat id (`-100…`). Parts ≤ 20 MB (Bot API `getFile` limit), reassembled on read with Range; tree in D1. A self-hosted Bot API server lifts the limit.
 - **Discord:** Developer Portal → Bot token; invite with View Channel, Send Messages, Attach Files, Read Message History (+ Manage Messages to delete); copy the channel id (Developer Mode). Parts default 8 MiB (bots: 10 MiB per message); expiring CDN URLs are refreshed via the API.
-- **HuggingFace:** token from huggingface.co/settings/tokens (`write` to upload); repo `user/name`, type, branch. Each write is one commit, LFS handled automatically (moves of LFS files are pointer-only). One request per file: limited to *Max upload size* (default 50 MiB) and the Worker proxy cap.
+- **HuggingFace:** token from huggingface.co/settings/tokens (`write` to upload); Dataset repos only; repo `user/name`, branch. Each write is one commit, LFS handled automatically (moves of LFS files are pointer-only). One request per file: limited to *Max upload size* (default 50 MiB) and the Worker proxy cap.
 - **GitHub (read-only):** owner + repo, show contents, releases (`/<tag>/<asset>`) or both (`/code`, `/releases`). Token optional (60 → 5000 requests/hour; fine-grained `Contents: Read` for private repos). All writes return `405`.
 
 **WebDAV:** mount `https://your-host/dav/` with the admin credentials, or any username plus an API key (`edk_…`) as the password.

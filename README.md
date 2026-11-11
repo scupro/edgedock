@@ -8,7 +8,7 @@ EdgeDock 把多個儲存空間（S3 相容儲存、WebDAV、OneDrive、Google Dr
 
 ## 功能
 
-- **多儲存掛載**：S3 相容（Cloudflare R2、Backblaze B2、AWS S3、阿里雲 OSS、騰訊雲 COS、MinIO 等）、WebDAV、OneDrive / SharePoint、Google Drive、Telegram、Discord、HuggingFace Hub、GitHub（唯讀）、本機目錄（僅 Node / Docker）。儲存憑證與 OAuth Token 以 AES-GCM 加密後存放於資料庫。
+- **多儲存掛載**：S3 相容（Cloudflare R2、Backblaze B2、AWS S3、阿里雲 OSS、騰訊雲 COS、MinIO 等）、WebDAV、OneDrive / SharePoint、Google Drive、Telegram、Discord、HuggingFace Dataset、GitHub（唯讀）、本機目錄（僅 Node / Docker）。儲存憑證與 OAuth Token 以 AES-GCM 加密後存放於資料庫。
 - **檔案管理**：瀏覽、上傳、下載、重新命名、移動、複製、刪除、建立資料夾，以及檔名搜尋（排程建立索引）。
 - **可靠的上傳**：依檔案大小與儲存空間自動選擇策略
   1. 瀏覽器以 presigned URL 直傳 S3（最快，需 Bucket CORS；可在後台「一鍵設定 CORS」）
@@ -267,10 +267,10 @@ docker compose up -d --build
 3. Discord 設定 → 進階 → 開啟開發者模式，右鍵頻道 → 複製頻道 ID。
 4. 檔案切成附件（預設 8 MiB；未加成伺服器的 Bot 上限為每則 10 MiB）。附件的 CDN 連結有簽章且會過期，讀取時會自動透過 API 取得新的連結。
 
-### HuggingFace Hub
+### HuggingFace Dataset
 
 1. [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 建立 Token：只瀏覽用 `read`；要上傳請用 `write` 或細粒度 Token 並勾選該 repo 的寫入權限。
-2. 填 Repo（`使用者/名稱`）、類型（dataset / model / space）、分支。
+2. 僅支援 **Dataset** repo：填 Dataset Repo（`使用者/名稱`）與分支。
 3. 每次上傳／刪除／移動都是一次 commit；Hub 要求放 LFS 的檔案（大型二進位檔）會自動經由 Git LFS 上傳，LFS 檔案的移動只改指標不重新上傳。每個檔案以單一請求上傳，大小上限為「上傳大小上限」（預設 50 MiB）且不超過 Worker 代理上限，更大的檔案請用 `huggingface-cli upload`。
 
 ### GitHub（唯讀）

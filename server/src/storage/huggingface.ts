@@ -1,5 +1,5 @@
 /**
- * HuggingFace Hub (model / dataset / space repos).
+ * HuggingFace Hub — Dataset repos only.
  *
  * Read: tree API for listings, paths-info for stat, /resolve/ (CDN, Range) for downloads.
  * Write: commit API (NDJSON). Small/text files are committed inline (base64); files the Hub wants in
@@ -17,7 +17,6 @@ import type { ByteRange, DriverContext, DriverDefinition, FileEntry, ReadResult,
 
 export interface HFConfig {
   repoId: string;
-  repoType?: 'model' | 'dataset' | 'space';
   revision?: string;
   token?: string;
   endpoint?: string;
@@ -59,7 +58,6 @@ export class HuggingFaceDriver extends BaseDriver {
   readonly type = 'huggingface';
   readonly capabilities: { presign: false; multipart: false; rangeRead: true; maxUploadSize: number };
   private ep: string;
-  private kind: 'model' | 'dataset' | 'space';
   private rev: string;
   private root: string;
   private fetchFn: typeof fetch;
@@ -71,7 +69,6 @@ export class HuggingFaceDriver extends BaseDriver {
     super();
     if (!cfg.repoId || !cfg.repoId.includes('/')) throw new Error('HuggingFace repo id must look like "user/name"');
     this.ep = (cfg.endpoint || 'https://huggingface.co').replace(/\/+$/, '');
-    this.kind = cfg.repoType || 'model';
     this.rev = cfg.revision || 'main';
     this.root = normalizePath(cfg.root || '/');
     this.fetchFn = ctx.fetch;
@@ -79,11 +76,10 @@ export class HuggingFaceDriver extends BaseDriver {
   }
 
   private get apiRepo(): string {
-    return `${this.ep}/api/${this.kind}s/${this.cfg.repoId}`;
+    return `${this.ep}/api/datasets/${this.cfg.repoId}`;
   }
   private get webRepo(): string {
-    const prefix = this.kind === 'dataset' ? 'datasets/' : this.kind === 'space' ? 'spaces/' : '';
-    return `${this.ep}/${prefix}${this.cfg.repoId}`;
+    return `${this.ep}/datasets/${this.cfg.repoId}`;
   }
   /** storage path → repo path (no leading slash) */
   private repoPath(p: string): string {
@@ -306,26 +302,14 @@ export class HuggingFaceDriver extends BaseDriver {
 
 export const huggingfaceDefinition: DriverDefinition = {
   type: 'huggingface',
-  label: 'HuggingFace Hub',
+  label: 'HuggingFace Dataset',
   runtimes: ['workers', 'node'],
   notes:
     'Token: huggingface.co → Settings → Access Tokens (read for browsing, write / fine-grained "write to repo" for uploads). Every upload / delete / move is a commit; large binary files go through Git LFS automatically. Files are uploaded in one request (limit: max upload size and the Worker proxy limit).',
   notesZh:
     'Token：huggingface.co → Settings → Access Tokens（瀏覽用 read；上傳需要 write 或細粒度「write to repo」）。每次上傳／刪除／移動都是一次 commit，大型二進位檔會自動走 Git LFS。檔案以單一請求上傳（上限：下方「上傳大小上限」與 Worker 代理上限）。',
   fields: [
-    { key: 'repoId', label: 'Repository', labelZh: 'Repo（使用者/名稱）', type: 'text', required: true, placeholder: 'user/my-dataset' },
-    {
-      key: 'repoType',
-      label: 'Repository type',
-      labelZh: 'Repo 類型',
-      type: 'select',
-      default: 'dataset',
-      options: [
-        { value: 'dataset', label: 'Dataset' },
-        { value: 'model', label: 'Model' },
-        { value: 'space', label: 'Space' },
-      ],
-    },
+    { key: 'repoId', label: 'Repository', labelZh: 'Dataset Repo（使用者/名稱）', type: 'text', required: true, placeholder: 'user/my-dataset' },
     { key: 'revision', label: 'Branch / revision', labelZh: '分支（revision）', type: 'text', default: 'main' },
     { key: 'token', label: 'Access token', labelZh: 'Access Token', type: 'password', secret: true },
     { key: 'root', label: 'Root folder', labelZh: '根目錄', type: 'text', default: '/' },
