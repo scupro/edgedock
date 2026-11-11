@@ -6,6 +6,8 @@ import { normalizePath } from '../lib/path';
 import type { AppEnv } from '../lib/types';
 import { buildDriver, invalidateMounts, splitConfig, type StorageRow } from '../storage/mounts';
 import { getDriverDefinition, listDriverDefinitions } from '../storage/registry';
+import { S3Driver } from '../storage/s3';
+import { checkBucketCors } from '../lib/bucketcors';
 
 export const storageRoutes = new Hono<AppEnv>();
 
@@ -39,7 +41,7 @@ storageRoutes.get('/types', (c) => {
   return c.json(
     listDriverDefinitions()
       .filter((d) => d.runtimes.includes(rt))
-      .map((d) => ({ type: d.type, label: d.label, fields: d.fields })),
+      .map((d) => ({ type: d.type, label: d.label, fields: d.fields, oauth: d.oauth ?? null, notes: d.notes, notesZh: d.notesZh })),
   );
 });
 
@@ -166,4 +168,59 @@ storageRoutes.post('/test', async (c) => {
   } catch (e) {
     return c.json({ ok: false, error: (e as Error).message });
   }
+});
+
+// ------------------------------------------------------------ S3 bucket CORS
+async function s3Of(c: { env: AppEnv['Bindings'] }, id: string): Promise<{ row: StorageRow; driver: S3Driver }> {
+  const row = await c.env.DB.prepare('SELECT * FROM storages WHERE id = ?').bind(id).first<StorageRow>();
+  if (!row) throw notFound();
+  const driver = await buildDriver(row, c.env);
+  if (!(driver instanceof S3Driver)) throw badRequest('Bucket CORS only applies to S3-compatible storages');
+  return { row, driver };
+}
+
+/** The browser origin that will PUT to the bucket: explicit > PUBLIC_URL > caller's Origin > this request's origin. */
+function siteOrigin(c: { env: AppEnv['Bindings']; req: { header(n: string): string | undefined; url: string } }, explicit?: string): string {
+  const pick = explicit || c.env.PUBLIC_URL || c.req.header('origin') || new URL(c.req.url).origin;
+  return new URL(pick).origin;
+}
+
+/** 一鍵設定 CORS: PutBucketCors with origin = site origin. */
+storageRoutes.post('/:id/cors/apply', async (c) => {
+  const b = await c.req.json<{ origin?: string }>().catch(() => ({}) as { origin?: string });
+  const { row, driver } = await s3Of(c, c.req.param('id'));
+  const origin = siteOrigin(c, b.origin);
+  const cfg = JSON.parse(row.config || '{}');
+  try {
+    await driver.putBucketCors([origin]);
+  } catch (e) {
+    const r = await checkBucketCors(driver, origin, cfg.bucket, cfg.provider);
+    return c.json({ ...r, applied: false, applyError: (e as Error).message });
+  }
+  const r = await checkBucketCors(driver, origin, cfg.bucket, cfg.provider);
+  return c.json({ ...r, applied: true });
+});
+
+/** 檢測 CORS (server side): GetBucketCors + simulated browser preflight. */
+storageRoutes.post('/:id/cors/check', async (c) => {
+  const b = await c.req.json<{ origin?: string }>().catch(() => ({}) as { origin?: string });
+  const { row, driver } = await s3Of(c, c.req.param('id'));
+  const cfg = JSON.parse(row.config || '{}');
+  return c.json(await checkBucketCors(driver, siteOrigin(c, b.origin), cfg.bucket, cfg.provider));
+});
+
+/** Presigned PUT for a tiny probe object: the browser tries it to prove CORS really works end to end. */
+storageRoutes.post('/:id/cors/probe', async (c) => {
+  const { driver } = await s3Of(c, c.req.param('id'));
+  const key = `/.edgedock-uploads/cors-probe-${uuid()}.txt`;
+  const signed = await driver.presignPut(key, { contentType: 'text/plain', expiresIn: 300 });
+  return c.json({ key, ...signed });
+});
+
+storageRoutes.post('/:id/cors/probe/cleanup', async (c) => {
+  const { key } = await c.req.json<{ key: string }>();
+  if (!/^\/\.edgedock-uploads\/cors-probe-[0-9a-f-]+\.txt$/.test(key)) throw badRequest('Invalid probe key');
+  const { driver } = await s3Of(c, c.req.param('id'));
+  await driver.delete(key).catch(() => {});
+  return c.json({ ok: true });
 });

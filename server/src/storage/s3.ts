@@ -2,6 +2,7 @@ import { AwsV4Signer } from 'aws4fetch';
 import { XMLParser } from 'fast-xml-parser';
 import { basename, joinPath, normalizePath } from '../lib/path';
 import { mimeFromPath } from '../lib/mime';
+import { md5Base64 } from '../lib/md5';
 import { BaseDriver, fetchBody, isHidden, rangeHeader } from './base';
 import type {
   ByteRange,
@@ -9,6 +10,7 @@ import type {
   DriverDefinition,
   FileEntry,
   MultipartSupport,
+  PendingUpstreamUpload,
   PresignedRequest,
   ReadResult,
   UploadedPart,
@@ -36,7 +38,7 @@ const xml = new XMLParser({
   ignoreAttributes: true,
   removeNSPrefix: true,
   parseTagValue: false,
-  isArray: (name) => ['Contents', 'CommonPrefixes', 'Part', 'Upload'].includes(name),
+  isArray: (name) => ['Contents', 'CommonPrefixes', 'Part', 'Upload', 'CORSRule', 'AllowedOrigin', 'AllowedMethod', 'AllowedHeader', 'ExposeHeader'].includes(name),
 });
 
 /** RFC 3986 encode a single path segment. */
@@ -81,10 +83,11 @@ export class S3Driver extends BaseDriver {
     this.multipart = {
       create: (p, o) => this.mpCreate(p, o.contentType),
       presignPart: (p, id, n, exp) => this.mpPresignPart(p, id, n, exp),
-      uploadPart: (p, id, n, body, size) => this.mpUploadPart(p, id, n, body, size),
+      uploadPart: (p, id, n, body, size, o) => this.mpUploadPart(p, id, n, body, size, o?.md5),
       complete: (p, id, parts) => this.mpComplete(p, id, parts),
       abort: (p, id) => this.mpAbort(p, id),
       listParts: (p, id) => this.mpListParts(p, id),
+      listUploads: () => this.mpListUploads(),
     };
   }
 
@@ -350,8 +353,10 @@ export class S3Driver extends BaseDriver {
     return { url: signed.url.toString(), method: 'PUT', headers: {}, expiresIn };
   }
 
-  private async mpUploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number): Promise<{ etag: string }> {
-    const res = await this.request('PUT', this.partUrl(path, uploadId, partNumber).toString(), { body, size });
+  private async mpUploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number, md5?: string): Promise<{ etag: string }> {
+    const headers: Record<string, string> = {};
+    if (md5) headers['content-md5'] = md5; // S3 rejects the part with BadDigest on mismatch
+    const res = await this.request('PUT', this.partUrl(path, uploadId, partNumber).toString(), { body, size, headers });
     const etag = res.headers.get('etag');
     if (!etag) throw new S3Error(500, 'NoETag', 'UploadPart returned no ETag');
     return { etag };
@@ -385,7 +390,7 @@ export class S3Driver extends BaseDriver {
       const parsed = xml.parse(await res.text());
       // AWS: ListPartsResult (moto answers ListPartsResponse)
       const doc = parsed?.ListPartsResult ?? parsed?.ListPartsResponse ?? {};
-      for (const p of doc.Part ?? []) out.push({ partNumber: Number(p.PartNumber), etag: String(p.ETag) });
+      for (const p of doc.Part ?? []) out.push({ partNumber: Number(p.PartNumber), etag: String(p.ETag), size: p.Size !== undefined ? Number(p.Size) : undefined });
       marker = doc.IsTruncated === 'true' ? String(doc.NextPartNumberMarker) : undefined;
     } while (marker);
     return out;
@@ -397,9 +402,102 @@ export class S3Driver extends BaseDriver {
     await this.request('DELETE', u.toString(), { okStatuses: [404] });
   }
 
+  /** ListMultipartUploads under the driver root (orphan cleanup). */
+  private async mpListUploads(): Promise<PendingUpstreamUpload[]> {
+    const out: PendingUpstreamUpload[] = [];
+    const rootKey = this.key('/');
+    let keyMarker: string | undefined;
+    let idMarker: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const u = new URL(this.bucketUrl() + '/');
+      u.searchParams.set('uploads', '');
+      if (rootKey) u.searchParams.set('prefix', rootKey + '/');
+      if (keyMarker) u.searchParams.set('key-marker', keyMarker);
+      if (idMarker) u.searchParams.set('upload-id-marker', idMarker);
+      const res = await this.request('GET', u.toString().replace('uploads=', 'uploads'));
+      const doc = xml.parse(await res.text())?.ListMultipartUploadsResult ?? {};
+      for (const x of doc.Upload ?? []) out.push({ key: this.rel(String(x.Key)), uploadId: String(x.UploadId), initiated: x.Initiated ? Date.parse(x.Initiated) : undefined });
+      if (doc.IsTruncated !== 'true') break;
+      keyMarker = doc.NextKeyMarker;
+      idMarker = doc.NextUploadIdMarker;
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------ bucket CORS
+  /** PutBucketCors: allow `origins` to GET/PUT/POST/HEAD/DELETE with any header, expose ETag. */
+  async putBucketCors(origins: string[], maxAgeSeconds = 3600): Promise<void> {
+    const rule =
+      '<CORSRule>' +
+      origins.map((o) => `<AllowedOrigin>${escapeXml(o)}</AllowedOrigin>`).join('') +
+      ['GET', 'PUT', 'POST', 'HEAD', 'DELETE'].map((m) => `<AllowedMethod>${m}</AllowedMethod>`).join('') +
+      '<AllowedHeader>*</AllowedHeader>' +
+      ['ETag', 'Content-Length', 'Content-Range', 'Accept-Ranges', 'x-amz-request-id'].map((h) => `<ExposeHeader>${h}</ExposeHeader>`).join('') +
+      `<MaxAgeSeconds>${maxAgeSeconds}</MaxAgeSeconds>` +
+      '</CORSRule>';
+    // keep existing rules for other origins
+    const existing = (await this.getBucketCors().catch(() => [])).filter((r) => !r.allowedOrigins.some((o) => origins.includes(o)));
+    const others = existing
+      .map(
+        (r) =>
+          '<CORSRule>' +
+          r.allowedOrigins.map((o) => `<AllowedOrigin>${escapeXml(o)}</AllowedOrigin>`).join('') +
+          r.allowedMethods.map((m) => `<AllowedMethod>${escapeXml(m)}</AllowedMethod>`).join('') +
+          r.allowedHeaders.map((h) => `<AllowedHeader>${escapeXml(h)}</AllowedHeader>`).join('') +
+          r.exposeHeaders.map((h) => `<ExposeHeader>${escapeXml(h)}</ExposeHeader>`).join('') +
+          (r.maxAgeSeconds ? `<MaxAgeSeconds>${r.maxAgeSeconds}</MaxAgeSeconds>` : '') +
+          '</CORSRule>',
+      )
+      .join('');
+    const body = `<?xml version="1.0" encoding="UTF-8"?><CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${rule}${others}</CORSConfiguration>`;
+    await this.request('PUT', this.bucketUrl() + '/?cors', { body, headers: { 'content-type': 'application/xml', 'content-md5': md5Base64(body) } });
+  }
+
+  async getBucketCors(): Promise<CorsRule[]> {
+    const res = await this.request('GET', this.bucketUrl() + '/?cors', { okStatuses: [404] });
+    if (res.status === 404) return [];
+    const doc = xml.parse(await res.text())?.CORSConfiguration ?? {};
+    return (doc.CORSRule ?? []).map((r: any) => ({
+      allowedOrigins: (r.AllowedOrigin ?? []).map(String),
+      allowedMethods: (r.AllowedMethod ?? []).map(String),
+      allowedHeaders: (r.AllowedHeader ?? []).map(String),
+      exposeHeaders: (r.ExposeHeader ?? []).map(String),
+      maxAgeSeconds: r.MaxAgeSeconds !== undefined ? Number(r.MaxAgeSeconds) : undefined,
+    }));
+  }
+
+  /** Send the preflight a browser would send before a presigned PUT, from the server. */
+  async simulatePreflight(origin: string): Promise<{ status: number; allowOrigin: string | null; allowMethods: string | null; exposeHeaders: string | null; allowHeaders: string | null }> {
+    const probe = await this.presignPut('/.edgedock-uploads/cors-probe', { expiresIn: 300 });
+    const res = await this.fetchFn(probe.url, {
+      method: 'OPTIONS',
+      headers: { origin, 'access-control-request-method': 'PUT', 'access-control-request-headers': 'content-type' },
+    });
+    await res.body?.cancel().catch(() => {});
+    return {
+      status: res.status,
+      allowOrigin: res.headers.get('access-control-allow-origin'),
+      allowMethods: res.headers.get('access-control-allow-methods'),
+      exposeHeaders: res.headers.get('access-control-expose-headers'),
+      allowHeaders: res.headers.get('access-control-allow-headers'),
+    };
+  }
+
+  get endpointHost(): string {
+    return new URL(this.cfg.endpoint).host;
+  }
+
   async test(): Promise<void> {
     await this.listKeys(this.key('/') ? this.key('/') + '/' : '', '/', 1);
   }
+}
+
+export interface CorsRule {
+  allowedOrigins: string[];
+  allowedMethods: string[];
+  allowedHeaders: string[];
+  exposeHeaders: string[];
+  maxAgeSeconds?: number;
 }
 
 function quoteEtag(e: string): string {

@@ -8,13 +8,13 @@
  *     (e.g. MinIO or R2). Skipped when neither is reachable.
  *     NOTE: moto does not strictly validate signatures, so (1) is what proves signing.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
 import { AwsV4Signer } from 'aws4fetch';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { S3Driver } from '../src/storage/s3';
 import { UploadService } from '../src/lib/uploads';
 import { Vfs } from '../src/storage/mounts';
 import { makeApp, makeEnv } from './helpers';
+import { startS3, stopS3 } from './moto';
 
 describe('SigV4 signing', () => {
   it('matches the AWS documentation presigned URL example', async () => {
@@ -46,47 +46,18 @@ describe('SigV4 signing', () => {
 });
 
 // ---------------------------------------------------------------- integration
-let proc: ChildProcess | null = null;
-let endpoint = process.env.S3_TEST_ENDPOINT ?? '';
-const accessKeyId = process.env.S3_TEST_KEY ?? 'testing';
-const secretAccessKey = process.env.S3_TEST_SECRET ?? 'testing';
-const bucket = process.env.S3_TEST_BUCKET ?? 'edgedock-test';
+let endpoint = '';
+let accessKeyId = '';
+let secretAccessKey = '';
+let bucket = '';
 let available = false;
 
-async function waitUp(url: string, ms = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    try {
-      await fetch(url);
-      return true;
-    } catch {
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  }
-  return false;
-}
-
 beforeAll(async () => {
-  if (!endpoint) {
-    const port = 15000 + Math.floor(Math.random() * 2000);
-    try {
-      proc = spawn('python3', ['-m', 'moto.server', '-p', String(port)], { stdio: 'ignore' });
-      proc.on('error', () => {});
-      endpoint = `http://127.0.0.1:${port}`;
-      if (!(await waitUp(endpoint))) return;
-    } catch {
-      return;
-    }
-  }
-  // create bucket (ignore "already exists")
-  const s = await new AwsV4Signer({ url: `${endpoint}/${bucket}`, method: 'PUT', accessKeyId, secretAccessKey, service: 's3', region: 'us-east-1' }).sign();
-  const r = await fetch(s.url, { method: 'PUT', headers: s.headers });
-  available = r.ok || r.status === 409;
+  const r = await startS3();
+  ({ endpoint, accessKeyId, secretAccessKey, bucket, available } = r);
 }, 30000);
 
-afterAll(() => {
-  proc?.kill();
-});
+afterAll(() => stopS3());
 
 describe('S3 driver against a live S3-protocol server', () => {
   const drv = () => new S3Driver({ endpoint, bucket, accessKeyId, secretAccessKey, region: 'us-east-1', pathStyle: true, root: '/edgedock' });

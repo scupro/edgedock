@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
 import { principalMiddleware } from './lib/auth';
-import { HttpError } from './lib/errors';
+import { corsMiddleware } from './lib/cors';
+import { HttpError, RetriableError } from './lib/errors';
 import type { AppEnv, Runtime } from './lib/types';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
@@ -24,20 +24,12 @@ export function createApp(runtime: Runtime) {
     await next();
   });
 
-  // CORS for the separately deployed frontend (CORS_ORIGINS="https://a.com,https://b.com" or "*")
-  const corsMw = cors({
-    origin: (origin, c) => {
-      const list = (c.env.CORS_ORIGINS ?? '').split(',').map((s: string) => s.trim()).filter(Boolean);
-      if (list.includes('*')) return origin || '*';
-      return list.includes(origin) ? origin : null;
-    },
-    allowHeaders: ['Authorization', 'Content-Type', 'X-API-Key', 'X-Share-Password', 'X-Share-Token', 'Range'],
-    allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    exposeHeaders: ['Content-Length', 'Content-Range', 'ETag', 'Content-Disposition'],
-    maxAge: 86400,
-  });
+  // CORS (CORS_ORIGINS / CORS_CREDENTIALS / CORS_MAX_AGE). Preflights are answered before auth.
+  const corsMw = corsMiddleware();
   app.use('/api/*', corsMw);
   app.use('/raw/*', corsMw);
+  app.use('/dav', corsMw);
+  app.use('/dav/*', corsMw);
 
   app.use('/api/*', principalMiddleware);
   app.use('/dav', principalMiddleware);
@@ -56,6 +48,11 @@ export function createApp(runtime: Runtime) {
   app.route('/dav', davRoutes);
 
   app.onError((err, c) => {
+    if (err instanceof RetriableError) {
+      c.header('X-EdgeDock-Retriable', '1');
+      if (err.retryAfter) c.header('Retry-After', String(err.retryAfter));
+      return c.json({ error: err.message, code: err.code, retriable: true }, err.status as 503);
+    }
     if (err instanceof HttpError) return c.json({ error: err.message, code: err.code }, err.status as 400);
     const status = (err as { status?: number }).status;
     if (status && status >= 400 && status < 600) return c.json({ error: err.message, code: 'upstream' }, (status === 404 ? 404 : 502) as 502);

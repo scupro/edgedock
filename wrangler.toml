@@ -51,7 +51,14 @@ crons = ["*/30 * * * *", "17 3 * * *"]
 [vars]
 # Comma-separated origins allowed to call the API when the frontend is deployed
 # separately (Pages / Vercel). Use "*" to allow any origin. Empty = same-origin only.
+# Entries may be exact origins, "*" or patterns like "https://*.example.com" / "http://localhost:*".
 CORS_ORIGINS = ""
+# Preflight cache seconds (Access-Control-Max-Age)
+CORS_MAX_AGE = "86400"
+# "true"/"false": Access-Control-Allow-Credentials (default: true for listed origins, false for "*")
+# CORS_CREDENTIALS = ""
+# Public URL of this deployment (OAuth redirect URIs, bucket CORS origin); default = request origin
+# PUBLIC_URL = "https://edgedock.example.com"
 # Admin session lifetime in hours
 JWT_TTL_HOURS = "168"
 

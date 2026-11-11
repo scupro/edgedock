@@ -36,6 +36,12 @@ export interface Env {
   ADMIN_PASSWORD?: string;
   /** Comma separated list of allowed origins for CORS, or "*" */
   CORS_ORIGINS?: string;
+  /** "true"/"false": send Access-Control-Allow-Credentials (default: true for listed origins, false for "*") */
+  CORS_CREDENTIALS?: string;
+  /** Preflight cache seconds (default 86400) */
+  CORS_MAX_AGE?: string;
+  /** Public base URL of this deployment (used for OAuth redirect URIs); defaults to the request origin */
+  PUBLIC_URL?: string;
   /** Token lifetime in hours (default 24*7) */
   JWT_TTL_HOURS?: string;
   ASSETS?: { fetch(req: Request): Promise<Response> };
