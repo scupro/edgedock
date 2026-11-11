@@ -139,17 +139,19 @@ export class UploadService {
     }
     const r: Resolved = this.vfs.mustResolve(path);
     const driver = r.mount.driver;
-    if (driver.capabilities.readOnly) throw badRequest('Storage is read-only');
+    if (driver.capabilities.readOnly) throw new HttpError(405, 'Storage is read-only', 'readonly');
     const caps = driver.capabilities;
     const mode = driver.multipart ? 'native' : 'emulated';
     const max = Math.min(input.maxPartSize ?? DEFAULT_MAX_PART, caps.maxPartSize ?? Number.MAX_SAFE_INTEGER);
     const min = Math.min(caps.minPartSize ?? (mode === 'native' ? MIN_PART_SIZE : 1024 * 1024), max);
-    const partSize = choosePartSize(input.size, input.partSize, { min, max });
+    let partSize = choosePartSize(input.size, input.partSize, { min, max });
+    if (caps.partSizeMultiple) partSize = Math.max(caps.partSizeMultiple, Math.floor(partSize / caps.partSizeMultiple) * caps.partSizeMultiple);
+    if (caps.maxUploadSize !== undefined && input.size > caps.maxUploadSize) throw new HttpError(413, `This storage accepts files up to ${caps.maxUploadSize} bytes through EdgeDock`, 'too_large');
     const totalParts = Math.max(1, Math.ceil(input.size / partSize));
     let upstreamId: string | null = null;
     if (driver.multipart) {
       try {
-        upstreamId = await driver.multipart.create(r.rel, { contentType: input.contentType });
+        upstreamId = await driver.multipart.create(r.rel, { contentType: input.contentType, size: input.size, partSize });
       } catch (e) {
         rethrowUpstream(e, 'Create multipart upload');
       }

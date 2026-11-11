@@ -38,11 +38,17 @@ uploadRoutes.post('/plan', async (c) => {
   const caps = driver.capabilities;
   if (caps.readOnly) throw new HttpError(405, 'Storage is read-only', 'readonly');
   const limits = clientLimits(settings);
+  if (caps.maxUploadSize !== undefined && size > caps.maxUploadSize) throw new HttpError(413, `This storage accepts files up to ${Math.floor(caps.maxUploadSize / MiB)} MiB through EdgeDock`, 'too_large');
   const base = { storageId: r.mount.row.id, limits };
   // Anything that might have to go through the Worker in one request must fit its body limit,
   // so files above min(threshold, proxy limit) are always chunked.
   const chunkAbove = Math.min(settings.multipartThresholdMB * MiB, limits.proxyMaxBytes);
   const canDirect = !noDirect && caps.presign;
+  // single-request storages (HuggingFace: one commit per file) never use emulated multipart
+  if (!driver.multipart && caps.maxUploadSize !== undefined) {
+    if (size > limits.proxyMaxBytes) throw new HttpError(413, `Files above ${Math.floor(limits.proxyMaxBytes / MiB)} MiB cannot be uploaded to this storage through the Worker`, 'too_large');
+    return c.json({ ...base, strategy: 'proxy' });
+  }
   if (size > chunkAbove) {
     return c.json({ ...base, strategy: 'multipart', direct: canDirect && !!driver.multipart?.presignPart });
   }
@@ -88,9 +94,10 @@ async function svc(c: { env: AppEnv['Bindings'] }) {
   return new UploadService(c.env, await Vfs.create(c.env));
 }
 
-function sessionJson(s: { session: any; parts: any[]; resumed?: boolean }) {
+function sessionJson(s: { session: any; parts: any[]; resumed?: boolean }, sequential = false) {
   const { session, parts } = s;
   return {
+    sequential,
     id: session.id,
     path: session.path,
     size: session.size,
@@ -128,7 +135,8 @@ uploadRoutes.post('/multipart/init', async (c) => {
     createdBy: `${principal.kind}:${principal.id}`,
     ttlHours: settings.uploadSessionTtlHours,
   });
-  return c.json({ ...sessionJson(s), limits: clientLimits(settings) });
+  const drv = (await Vfs.create(c.env)).mounts.find((m) => m.row.id === s.session.storage_id)?.driver;
+  return c.json({ ...sessionJson(s, !!drv?.capabilities.sequentialParts && s.session.mode === 'native'), limits: clientLimits(settings) });
 });
 
 /** Session state; `?verify=1` reconciles recorded parts against the provider (ListParts / temp parts). */

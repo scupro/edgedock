@@ -71,7 +71,8 @@ export interface PendingUpstreamUpload {
 }
 
 export interface MultipartSupport {
-  create(path: string, opts: { contentType?: string }): Promise<string>;
+  /** size / partSize are known when the session is created (needed by OneDrive / Google Drive sessions) */
+  create(path: string, opts: { contentType?: string; size?: number; partSize?: number }): Promise<string>;
   presignPart?(path: string, uploadId: string, partNumber: number, expiresIn: number): Promise<PresignedRequest>;
   /** `md5` (base64) is forwarded as Content-MD5 where the provider verifies it. */
   uploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number, opts?: { md5?: string }): Promise<{ etag: string }>;
@@ -91,6 +92,12 @@ export interface DriverCapabilities {
   maxPartSize?: number;
   /** smallest non-final part (bytes); default 5 MiB (S3 rule) for native multipart, 1 MiB emulated */
   minPartSize?: number;
+  /** parts must be a multiple of this (OneDrive 320 KiB, Google Drive 256 KiB) */
+  partSizeMultiple?: number;
+  /** parts must arrive strictly in order (upload sessions): the browser uploads one at a time */
+  sequentialParts?: boolean;
+  /** largest file that can be written at all through EdgeDock (e.g. HuggingFace: one request) */
+  maxUploadSize?: number;
 }
 
 export interface StorageDriver {
@@ -144,6 +151,8 @@ export interface DriverDefinition {
   /** runtimes that can host this driver */
   runtimes: ('workers' | 'node')[];
   fields: DriverField[];
+  /** every write answers 405 */
+  readOnly?: boolean;
   /** OAuth helper flow supported by the admin UI (/api/oauth/<provider>/start) */
   oauth?: 'onedrive' | 'gdrive';
   /** one-line description / limits shown in the admin UI */

@@ -1,5 +1,5 @@
 import { decryptString, encryptString } from '../lib/crypto';
-import { badRequest, notFound } from '../lib/errors';
+import { badRequest, HttpError, notFound } from '../lib/errors';
 import { mimeFromPath } from '../lib/mime';
 import { basename, dirname, isWithin, joinPath, normalizePath } from '../lib/path';
 import type { Env } from '../lib/types';
@@ -71,7 +71,7 @@ export async function buildDriver(row: StorageRow, env: Env, fetchFn: typeof fet
   if (!def) throw new Error(`Storage driver "${row.type}" is not available in this runtime`);
   const cfg = JSON.parse(row.config || '{}');
   const secret = row.secret ? JSON.parse(await decryptString(row.secret, env.ENCRYPTION_KEY)) : {};
-  return def.create({ ...cfg, ...secret }, { fetch: fetchFn });
+  return def.create({ ...cfg, ...secret }, { fetch: fetchFn, env, storageId: row.id });
 }
 
 export async function loadMounts(env: Env): Promise<MountedStorage[]> {
@@ -89,6 +89,11 @@ export async function loadMounts(env: Env): Promise<MountedStorage[]> {
   }
   cache = { at: Date.now(), key, mounts };
   return mounts;
+}
+
+/** Read-only storages (GitHub, ...) reject every write with 405. */
+export function assertWritable(r: Resolved): void {
+  if (r.mount.driver.capabilities.readOnly) throw new HttpError(405, 'Storage is read-only', 'readonly');
 }
 
 /** Virtual file system over all mounted storages. */
@@ -165,7 +170,7 @@ export class Vfs {
 
   write(vpath: string, body: WriteBody, opts: WriteOptions = {}): Promise<void> {
     const r = this.mustResolve(vpath);
-    if (r.mount.driver.capabilities.readOnly) throw badRequest('Storage is read-only');
+    assertWritable(r);
     // HTTP clients (curl, some WebDAV clients) send form/octet defaults: store a real type instead
     const ct = opts.contentType;
     const contentType = !ct || /x-www-form-urlencoded|multipart\/form-data|^application\/octet-stream/i.test(ct) ? mimeFromPath(vpath) : ct;
@@ -174,12 +179,14 @@ export class Vfs {
 
   async mkdir(vpath: string): Promise<void> {
     const r = this.mustResolve(vpath);
+    assertWritable(r);
     await r.mount.driver.mkdir(r.rel);
   }
 
   async delete(vpath: string): Promise<void> {
     const r = this.mustResolve(vpath);
     if (r.rel === '/') throw badRequest('Cannot delete a mount root');
+    assertWritable(r);
     await r.mount.driver.delete(r.rel);
   }
 
@@ -189,6 +196,8 @@ export class Vfs {
     const b = this.mustResolve(to);
     if (a.rel === '/') throw badRequest('Cannot move a mount root');
     if (isWithin(b.vpath, a.vpath)) throw badRequest('Destination is inside source');
+    assertWritable(b);
+    if (op === 'move') assertWritable(a);
     if (a.mount === b.mount) {
       if (op === 'move') await a.mount.driver.move(a.rel, b.rel);
       else await a.mount.driver.copy(a.rel, b.rel);

@@ -5,13 +5,14 @@ import { HttpError, RetriableError } from './lib/errors';
 import type { AppEnv, Runtime } from './lib/types';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
+import { oauthRoutes } from './routes/oauth';
 import { fileLinkRoutes, fsRoutes } from './routes/fs';
 import { publicShareRoutes, rawRoutes, shareRoutes } from './routes/shares';
 import { storageRoutes } from './routes/storages';
 import { uploadRoutes } from './routes/upload';
 import { davRoutes } from './webdav/server';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export function createApp(runtime: Runtime) {
   const app = new Hono<AppEnv>();
@@ -44,6 +45,7 @@ export function createApp(runtime: Runtime) {
   app.route('/api/shares', shareRoutes);
   app.route('/api/public/shares', publicShareRoutes);
   app.route('/api/admin', adminRoutes);
+  app.route('/api/oauth', oauthRoutes);
   app.route('/raw', rawRoutes);
   app.route('/dav', davRoutes);
 

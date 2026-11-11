@@ -1,11 +1,16 @@
+import { discordDefinition } from './discord';
+import { gdriveDefinition } from './gdrive';
+import { githubDefinition } from './github';
+import { huggingfaceDefinition } from './huggingface';
+import { onedriveDefinition } from './onedrive';
 import { s3Definition } from './s3';
+import { telegramDefinition } from './telegram';
 import { webdavDefinition } from './webdav';
 import type { DriverDefinition } from './types';
 
 /**
  * Driver registry. Workers entry gets the portable drivers; the Node entry
- * additionally registers `local`. Phase 2 drivers (onedrive, gdrive,
- * telegram, discord, huggingface, github) plug in here via registerDriver().
+ * additionally registers `local`.
  */
 const drivers = new Map<string, DriverDefinition>();
 
@@ -23,3 +28,9 @@ export function listDriverDefinitions(): DriverDefinition[] {
 
 registerDriver(s3Definition);
 registerDriver(webdavDefinition);
+registerDriver(onedriveDefinition);
+registerDriver(gdriveDefinition);
+registerDriver(telegramDefinition);
+registerDriver(discordDefinition);
+registerDriver(huggingfaceDefinition);
+registerDriver(githubDefinition);

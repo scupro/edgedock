@@ -30,6 +30,8 @@ function toPublic(row: StorageRow) {
     enabled: !!row.enabled,
     sort: row.sort,
     available: !!def && def.runtimes.length > 0,
+    readOnly: !!def?.readOnly,
+    oauth: def?.oauth ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -41,7 +43,7 @@ storageRoutes.get('/types', (c) => {
   return c.json(
     listDriverDefinitions()
       .filter((d) => d.runtimes.includes(rt))
-      .map((d) => ({ type: d.type, label: d.label, fields: d.fields, oauth: d.oauth ?? null, notes: d.notes, notesZh: d.notesZh })),
+      .map((d) => ({ type: d.type, label: d.label, fields: d.fields, oauth: d.oauth ?? null, notes: d.notes, notesZh: d.notesZh, readOnly: !!d.readOnly })),
   );
 });
 
@@ -145,7 +147,13 @@ storageRoutes.post('/:id/default', async (c) => {
 
 storageRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
-  await c.env.DB.batch([c.env.DB.prepare('DELETE FROM storages WHERE id = ?').bind(id), c.env.DB.prepare('DELETE FROM file_index WHERE storage_id = ?').bind(id)]);
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM storages WHERE id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM file_index WHERE storage_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM oauth_tokens WHERE storage_id = ?').bind(id),
+    // message-based storages: the metadata goes, the messages stay in the chat/channel
+    c.env.DB.prepare('DELETE FROM blob_entries WHERE storage_id = ?').bind(id),
+  ]);
   invalidateMounts();
   return c.json({ ok: true });
 });
