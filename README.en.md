@@ -12,7 +12,7 @@ The Chinese README is the primary, more detailed document.
 
 - Storage mounts: S3-compatible (R2, B2, AWS S3, OSS, COS, MinIO…), WebDAV, OneDrive / SharePoint, Google Drive, Telegram, Discord, HuggingFace Dataset, GitHub (read-only), local folders (Node/Docker only). Credentials and OAuth tokens are AES-GCM encrypted at rest.
 - File operations, filename search (scheduled index).
-- Reliable uploads: presigned direct PUT (with automatic proxy fallback on CORS errors) → small streaming PUTs through the Worker → chunked, resumable multipart for everything else, with per-part retry, MD5 checks and resume after reload.
+- Reliable uploads: browser-direct uploads to the provider wherever possible (S3 presigned URLs, OneDrive / Google Drive upload sessions, HuggingFace LFS part URLs; automatic Worker fallback on CORS errors, remembered per storage) → small streaming PUTs through the Worker → chunked, resumable multipart for everything else, with per-part retry, MD5 checks and resume after reload.
 - Previews: images, video, audio, PDF, DOCX, spreadsheets, Markdown, JSON, EPUB, ~80 code languages, plain text, plus a configurable external previewer. See [`web/src/lib/fileTypes.ts`](./web/src/lib/fileTypes.ts).
 - Vditor Markdown editor (self-hosted assets, KaTeX, Mermaid), export to PDF / image / Word.
 - Share links with password, expiry and view limits; `/raw/` direct links.
@@ -71,6 +71,21 @@ The Chinese README is the primary, more detailed document.
 - Integrity: MD5 per part (`Content-MD5`, verified by S3 / by the Worker while streaming / against the part ETag for direct uploads), final size and S3 multipart-ETag verification. Cron aborts expired sessions and orphaned multipart uploads.
 - UI: progress, speed, ETA, retry count, pause / resume / cancel; messages in 正體中文 or English.
 
+### Direct vs. via the Worker
+
+| Storage | Browser upload data path | Notes |
+| --- | --- | --- |
+| S3-compatible | **direct** (presigned PUT / parts) | needs bucket CORS exposing `ETag`; falls back to the Worker |
+| OneDrive / SharePoint | **direct** (> 4 MiB) | server creates the Graph upload session (`createUploadSession`); the browser PUTs chunks in order with `Content-Range` to the pre-authenticated `uploadUrl` (no Authorization header; 320 KiB multiples, ≤ 60 MiB); ≤ 4 MiB via the Worker |
+| Google Drive | **direct** (> 4 MiB) | server initiates the resumable session with the browser's `Origin` (request Origin or `PUBLIC_URL`) so Google answers it with CORS; chunks in order (256 KiB multiples, `308` = chunk accepted); ≤ 4 MiB via the Worker |
+| HuggingFace Dataset | **direct** (above the multipart threshold) | SHA-256 in the browser, then PUTs to the Hub's presigned LFS part URLs; small files via the Worker |
+| Telegram / Discord | via the Worker | needs the bot token, which must not reach the browser |
+| WebDAV | via the Worker | needs the server credentials; most servers have no CORS |
+| Local folder | via the Worker | files live on the server |
+| GitHub | — | read-only |
+
+Direct uploads keep retry/backoff/timeouts/pause/offline handling; the server only creates the session, signs URLs and verifies the result (size, item id, ETag or SHA-256), so file bytes never cross the Worker body limit. OneDrive / Google Drive ask the provider what it already received (`nextExpectedRanges` / `Content-Range: bytes */size`) before each chunk, so a chunk whose response was lost is not re-sent. Session URLs are kept in D1 + IndexedDB for resume after a reload. If a direct PUT fails like a CORS/network error, the remaining parts go through the Worker into the same session and the storage is remembered (7 days).
+
 ## Storage drivers
 
 - **OneDrive / SharePoint:** Entra ID → App registrations → new app; platform *Web* with redirect URI `https://your-host/api/oauth/onedrive/callback`; create a client secret; delegated permissions `Files.ReadWrite.All` + `offline_access`. Enter Client ID / secret (tenant for business), save, press **Authorize**. Optional drive id (SharePoint libraries), root folder, 21Vianet cloud.
@@ -93,7 +108,7 @@ The Chinese README is the primary, more detailed document.
 - WebDAV cache is per Cloudflare datacenter.
 - `Depth: infinity` is treated as `1`.
 - Resuming an upload after a reload requires re-selecting the same file.
-- OneDrive / Google Drive sessions are sequential (1 part in flight per file). Native Google Docs can't be downloaded.
+- OneDrive / Google Drive sessions are sequential (1 part in flight per file); direct uploads rely on provider CORS (OneDrive upload URLs, Google sessions initiated with the Origin) and fall back to the Worker. Native Google Docs can't be downloaded.
 - Telegram parts ≤ 20 MB on the public Bot API; bots can only delete private-chat messages for 48 h. Telegram / Discord trees live only in D1 — back it up. Deleting such a storage keeps the messages.
 - Discord parts ≤ 10 MiB on non-boosted servers; heavy uploads hit rate limits (handled with backoff).
 - HuggingFace: Dataset repos only; one commit per write (the Hub rate-limits commits). Browser uploads of big files are direct and resumable but hash the whole file first; WebDAV PUT is limited to 100 MiB.

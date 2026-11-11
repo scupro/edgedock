@@ -309,6 +309,9 @@ export class UploadService {
     if (session.mode === 'native') {
       if (!driver.multipart?.listParts) return parts;
       const upstream = await driver.multipart.listParts(session.object_key, session.upstream_upload_id!);
+      // a session-style upload whose last chunk already landed is closed by the provider (OneDrive: 404):
+      // keep the full part list, `complete` verifies the final object instead
+      if (!upstream.length && driver.capabilities.sequentialParts && parts.length === session.total_parts) return parts;
       const byN = new Map(upstream.map((p) => [p.partNumber, p]));
       for (const p of parts) {
         const u = byN.get(p.part_number);

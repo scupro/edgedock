@@ -4,7 +4,9 @@
  * Auth: OAuth2 authorization code → refresh token (admin UI helper flow, /api/oauth/onedrive/callback).
  * Uploads: small files with a simple PUT, anything else with an upload session; EdgeDock multipart
  * sessions map 1:1 to Graph upload sessions (parts are 320 KiB multiples, uploaded in order, resumable
- * via nextExpectedRanges).
+ * via nextExpectedRanges). Browser uploads go direct: the server creates the session and hands the
+ * pre-authenticated uploadUrl to the browser (`presignPart`: same URL + Content-Range per part, never an
+ * Authorization header); the browser PUTs the parts in order, and the Worker proxies a part only as a fallback.
  */
 import { basename, dirname, joinPath, normalizePath } from '../lib/path';
 import { mimeFromPath } from '../lib/mime';
@@ -77,6 +79,7 @@ export class OneDriveDriver extends BaseDriver {
     rangeRead: true,
     partSizeMultiple: CHUNK_UNIT,
     sequentialParts: true,
+    directParts: true,
     minPartSize: CHUNK_UNIT,
     maxPartSize: 60 * 1024 * 1024 - ((60 * 1024 * 1024) % CHUNK_UNIT),
   };
@@ -114,6 +117,13 @@ export class OneDriveDriver extends BaseDriver {
       });
     this.multipart = {
       create: (p, o) => this.sessionCreate(p, o.size ?? 0, o.partSize ?? this.chunk),
+      presignPart: async (_p, id, n, expiresIn) => {
+        const t = this.parseToken(id);
+        const start = (n - 1) * t.p;
+        const end = Math.min(t.s, start + t.p) - 1;
+        // pre-authenticated upload URL: the browser must NOT send an Authorization header to it
+        return { url: t.u, method: 'PUT', headers: { 'content-range': `bytes ${start}-${end}/${t.s}` }, expiresIn };
+      },
       uploadPart: (p, id, n, body, size) => this.sessionPut(id, n, body, size),
       complete: (p, id, parts) => this.sessionComplete(p, id, parts),
       abort: (_p, id) => this.sessionAbort(id),
@@ -273,7 +283,7 @@ export class OneDriveDriver extends BaseDriver {
     return Array.from({ length: done }, (_, i) => ({ partNumber: i + 1, etag: `od-${i + 1}`, size: t.p }));
   }
 
-  private async sessionComplete(path: string, id: string, _parts: UploadedPart[]): Promise<void> {
+  private async sessionComplete(path: string, id: string, parts: UploadedPart[]): Promise<void> {
     const t = this.parseToken(id);
     if (t.s === 0) {
       await this.write(path, new Uint8Array(0), { size: 0 });
@@ -282,6 +292,12 @@ export class OneDriveDriver extends BaseDriver {
     // the last chunk already committed the file; make sure it exists with the right size
     const st = await this.stat(path);
     if (!st || st.size !== t.s) throw new ProviderError(409, `OneDrive upload incomplete (${st?.size ?? 0}/${t.s} bytes)`);
+    // the browser reports the item id from the final chunk's response: it must be the item at this path
+    const itemId = parts.map((p) => p.etag).find((e) => e?.startsWith('item:'))?.slice(5);
+    if (itemId) {
+      const it = await this.item(path);
+      if (it && it.id !== itemId) throw new ProviderError(409, `OneDrive upload finished as item ${itemId}, but ${path} is ${it.id}`);
+    }
   }
 
   private async sessionAbort(id: string): Promise<void> {
@@ -353,9 +369,9 @@ export const onedriveDefinition: DriverDefinition = {
   runtimes: ['workers', 'node'],
   oauth: 'onedrive',
   notes:
-    'Register an app in Entra ID (Azure portal → App registrations), add the redirect URI below as a "Web" platform, create a client secret, grant Files.ReadWrite.All + offline_access, then press Authorize. Uploads use Graph upload sessions (in order, resumable).',
+    'Register an app in Entra ID (Azure portal → App registrations), add the redirect URI below as a "Web" platform, create a client secret, grant Files.ReadWrite.All + offline_access, then press Authorize. Uploads use Graph upload sessions (in order, resumable); the browser sends the chunks straight to OneDrive, with the Worker as fallback.',
   notesZh:
-    '在 Entra ID（Azure 入口網站 → 應用程式註冊）建立應用程式，平台選「Web」並加入下方 Redirect URI，建立用戶端密碼，授予 Files.ReadWrite.All 與 offline_access 權限，填入後按「授權」。上傳使用 Graph 上傳工作階段（依序、可續傳）。',
+    '在 Entra ID（Azure 入口網站 → 應用程式註冊）建立應用程式，平台選「Web」並加入下方 Redirect URI，建立用戶端密碼，授予 Files.ReadWrite.All 與 offline_access 權限，填入後按「授權」。上傳使用 Graph 上傳工作階段（依序、可續傳），由瀏覽器直接傳到 OneDrive，失敗時改走 Worker。',
   fields: [
     {
       key: 'driveType',

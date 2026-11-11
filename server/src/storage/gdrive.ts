@@ -6,6 +6,10 @@
  * Paths are resolved to file IDs by walking from `rootFolderId` (cached briefly).
  * Uploads: multipart for small files, resumable upload sessions otherwise; EdgeDock multipart sessions
  * map 1:1 to a resumable session (256 KiB multiples, in order, status via `Content-Range: bytes * /N`).
+ * Browser uploads go direct: the session is initiated with an `Origin` header equal to the browser's
+ * origin (so Google answers the browser's chunk PUTs with CORS headers) and the session URI is handed to
+ * the browser (`presignPart`), which PUTs the parts in order (308 = chunk accepted). The Worker proxies
+ * a part only as a fallback.
  */
 import { basename, dirname, joinPath, normalizePath } from '../lib/path';
 import { mimeFromPath } from '../lib/mime';
@@ -60,7 +64,7 @@ interface SessionToken {
 
 export class GDriveDriver extends BaseDriver {
   readonly type = 'gdrive';
-  readonly capabilities = { presign: false, multipart: true, rangeRead: true, partSizeMultiple: UNIT, sequentialParts: true, minPartSize: UNIT };
+  readonly capabilities = { presign: false, multipart: true, rangeRead: true, partSizeMultiple: UNIT, sequentialParts: true, minPartSize: UNIT, directParts: true };
   readonly multipart: MultipartSupport;
   tokens: TokenSource;
   private fetchFn: typeof fetch;
@@ -101,9 +105,16 @@ export class GDriveDriver extends BaseDriver {
       });
     }
     this.multipart = {
-      create: (p, o) => this.sessionCreate(p, o.size ?? 0, o.contentType, o.partSize ?? this.chunk),
+      create: (p, o) => this.sessionCreate(p, o.size ?? 0, o.contentType, o.partSize ?? this.chunk, o.origin),
+      presignPart: async (_p, id, n, expiresIn) => {
+        const t = this.parse(id);
+        const start = (n - 1) * t.p;
+        const end = Math.min(t.s, start + t.p) - 1;
+        // the session URI authorizes the PUT by itself; 308 Resume Incomplete = chunk accepted
+        return { url: t.u, method: 'PUT', headers: { 'content-range': `bytes ${start}-${end}/${t.s}` }, expiresIn, okStatus: [308] };
+      },
       uploadPart: (_p, id, n, body, size) => this.sessionPut(id, n, body, size),
-      complete: (p, id) => this.sessionComplete(p, id),
+      complete: (p, id, parts) => this.sessionComplete(p, id, parts),
       abort: (_p, id) => this.sessionAbort(id),
       listParts: (_p, id) => this.sessionParts(id),
     };
@@ -264,7 +275,7 @@ export class GDriveDriver extends BaseDriver {
     }
   }
 
-  private async sessionCreate(path: string, size: number, contentType: string | undefined, partSize: number): Promise<string> {
+  private async sessionCreate(path: string, size: number, contentType: string | undefined, partSize: number, origin?: string): Promise<string> {
     const p = normalizePath(path);
     const parent = await this.ensureDir(dirname(p));
     const existing = await this.resolve(p);
@@ -272,7 +283,8 @@ export class GDriveDriver extends BaseDriver {
     const res = await ensureOk(
       await this.api(url, () => ({
         method: existing ? 'PATCH' : 'POST',
-        headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-type': contentType || mimeFromPath(p), 'x-upload-content-length': String(size) },
+        // Origin: Google binds the session URI to it and then answers that origin's chunk PUTs with CORS headers
+        headers: { 'content-type': 'application/json; charset=UTF-8', 'x-upload-content-type': contentType || mimeFromPath(p), 'x-upload-content-length': String(size), ...(origin ? { origin } : {}) },
         body: JSON.stringify(existing ? { name: basename(p) } : { name: basename(p), parents: [parent.id] }),
       })),
       'Google Drive resumable session',
@@ -325,12 +337,18 @@ export class GDriveDriver extends BaseDriver {
     return Array.from({ length: full }, (_, i) => ({ partNumber: i + 1, etag: `gd-${i + 1}`, size: Math.min(t.p, t.s - i * t.p) }));
   }
 
-  private async sessionComplete(path: string, id: string): Promise<void> {
+  private async sessionComplete(path: string, id: string, parts: UploadedPart[] = []): Promise<void> {
     const t = this.parse(id);
     if (t.s === 0) await this.sessionPut(id, 1, new Uint8Array(0), 0);
     this.forget(path);
     const st = await this.stat(path);
     if (!st || st.size !== t.s) throw new ProviderError(409, `Google Drive upload incomplete (${st?.size ?? 0}/${t.s} bytes)`);
+    // the browser reports the file id from the final chunk's response: it must be the file at this path
+    const fileId = parts.map((p) => p.etag).find((e) => e?.startsWith('item:'))?.slice(5);
+    if (fileId) {
+      const f = await this.resolve(path);
+      if (f && f.id !== fileId) throw new ProviderError(409, `Google Drive upload finished as file ${fileId}, but ${path} is ${f.id}`);
+    }
   }
 
   private async sessionAbort(id: string): Promise<void> {
@@ -400,9 +418,9 @@ export const gdriveDefinition: DriverDefinition = {
   runtimes: ['workers', 'node'],
   oauth: 'gdrive',
   notes:
-    'OAuth: Google Cloud console → APIs & Services → enable "Google Drive API" → Credentials → OAuth client ID (Web application) with the redirect URI below; then press Authorize. Service account: create a key (JSON), paste it, and share the root folder (or a shared drive) with the service account e-mail.',
+    'OAuth: Google Cloud console → APIs & Services → enable "Google Drive API" → Credentials → OAuth client ID (Web application) with the redirect URI below; then press Authorize. Service account: create a key (JSON), paste it, and share the root folder (or a shared drive) with the service account e-mail. Uploads above 4 MiB go from the browser straight to Google (resumable session bound to this site origin), with the Worker as fallback.',
   notesZh:
-    'OAuth：Google Cloud 主控台 → API 和服務 → 啟用「Google Drive API」→ 憑證 → 建立 OAuth 用戶端 ID（網頁應用程式），授權重新導向 URI 填下方網址，再按「授權」。服務帳戶：建立 JSON 金鑰貼上，並把根資料夾（建議共用雲端硬碟）分享給服務帳戶的電子郵件。',
+    'OAuth：Google Cloud 主控台 → API 和服務 → 啟用「Google Drive API」→ 憑證 → 建立 OAuth 用戶端 ID（網頁應用程式），授權重新導向 URI 填下方網址，再按「授權」。服務帳戶：建立 JSON 金鑰貼上，並把根資料夾（建議共用雲端硬碟）分享給服務帳戶的電子郵件。超過 4 MiB 的檔案由瀏覽器直接傳到 Google（工作階段綁定本站來源），失敗時改走 Worker。',
   fields: [
     {
       key: 'authType',

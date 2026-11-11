@@ -11,7 +11,7 @@ EdgeDock 把多個儲存空間（S3 相容儲存、WebDAV、OneDrive、Google Dr
 - **多儲存掛載**：S3 相容（Cloudflare R2、Backblaze B2、AWS S3、阿里雲 OSS、騰訊雲 COS、MinIO 等）、WebDAV、OneDrive / SharePoint、Google Drive、Telegram、Discord、HuggingFace Dataset、GitHub（唯讀）、本機目錄（僅 Node / Docker）。儲存憑證與 OAuth Token 以 AES-GCM 加密後存放於資料庫。
 - **檔案管理**：瀏覽、上傳、下載、重新命名、移動、複製、刪除、建立資料夾，以及檔名搜尋（排程建立索引）。
 - **可靠的上傳**：依檔案大小與儲存空間自動選擇策略
-  1. 瀏覽器以 presigned URL 直傳 S3（最快，需 Bucket CORS；可在後台「一鍵設定 CORS」）
+  1. 瀏覽器直傳儲存服務（S3 presigned URL、OneDrive／Google Drive 上傳工作階段、HuggingFace LFS 分段網址），不經過 Worker；直傳失敗（CORS／網路類錯誤）時自動改走 Worker 並記住該儲存空間
   2. 經由 Worker 串流上傳（只用於小檔，永遠低於 Worker 請求上限）
   3. 分段上傳：每段自動重試（指數退避 + 抖動）、逾時偵測、斷網自動暫停、重新整理後續傳、MD5 逐段校驗，詳見「上傳可靠性」
 - **線上預覽**：圖片、影音、PDF、Word、試算表、Markdown、程式碼高亮、EPUB 等（完整清單見下方），其他格式可設定外部預覽服務。
@@ -235,6 +235,24 @@ docker compose up -d --build
 - **介面**：每個檔案顯示進度、速度、剩餘時間、重試次數、暫停／繼續／取消，錯誤訊息為正體中文。
 - 相關設定（後台「設定」）：分段大小、分段門檻、每檔並行段數、每段嘗試次數、每段逾時、Worker 代理單次上限、未完成上傳保留時數。
 
+### 直傳或經 Worker
+
+| 儲存 | 網頁上傳的資料路徑 | 說明 |
+| --- | --- | --- |
+| S3 相容 | **瀏覽器直傳**（presigned PUT／分段） | 需 Bucket CORS 並公開 `ETag`；失敗自動改走 Worker |
+| OneDrive / SharePoint | **瀏覽器直傳**（> 4 MiB） | 伺服器建立 Graph 上傳工作階段（`createUploadSession`），瀏覽器以 `Content-Range` 依序 PUT 到預先授權的 `uploadUrl`（不帶 Authorization；320 KiB 倍數、每段 ≤ 60 MiB）；≤ 4 MiB 經 Worker |
+| Google Drive | **瀏覽器直傳**（> 4 MiB） | 伺服器以瀏覽器的 `Origin`（請求的 Origin，或 `PUBLIC_URL`）建立 resumable 工作階段，Google 才會對該來源回 CORS；瀏覽器依序 PUT（256 KiB 倍數，`308` 表示該段已收到）；≤ 4 MiB 經 Worker |
+| HuggingFace Dataset | **瀏覽器直傳**（大於分段門檻） | 先在瀏覽器算 SHA-256，再 PUT 到 Hub 的 LFS presigned 分段網址；小檔經 Worker |
+| Telegram / Discord | 經 Worker | 需要 Bot Token，不能交給瀏覽器 |
+| WebDAV | 經 Worker | 需要帳號密碼，且多數伺服器不支援 CORS |
+| 本機目錄 | 經 Worker | 檔案寫在伺服器上 |
+| GitHub | — | 唯讀 |
+
+- 直傳時，伺服器只負責建立工作階段、簽發網址與完成時驗證（大小、項目 ID、ETag 或 SHA-256），檔案內容不經過 Worker，不受 Worker 請求本體上限影響。
+- 直傳的分段一樣有重試、退避、逾時、暫停／繼續與離線等待；OneDrive／Google Drive 每次簽發前會向服務查詢已收到的位置（`nextExpectedRanges`／`Content-Range: bytes */大小`），回應遺失的分段不會重送。
+- 工作階段網址存在 D1 與 IndexedDB，重新整理後重新選擇同一個檔案即可續傳。
+- 直傳失敗（CORS／網路類錯誤）時，剩下的分段改由 Worker 轉送同一個工作階段，並記住此儲存空間（7 天）之後都走 Worker。
+
 ## 儲存驅動設定
 
 所有表單欄位都由驅動定義產生；密碼類欄位加密儲存，編輯時留空表示不變更。
@@ -319,7 +337,7 @@ WebDAV 端點：`https://你的網域/dav/`
 - **WebDAV 快取以資料中心為單位**：Worker 使用 Cache API，快取只存在於各個 Cloudflare 資料中心，不同地區可能短暫看到舊內容（預設 TTL 30 秒，可在設定調整）。
 - **`Depth: infinity` 視為 `1`**：PROPFIND 不支援無限深度，只回傳一層。
 - **續傳需重新選擇檔案**：重新整理頁面後，瀏覽器無法自動取回檔案，需重新選擇同一個檔案才能從已上傳的分段繼續。
-- **OneDrive / Google Drive**：上傳工作階段必須依序上傳，因此每個檔案只用 1 個並行分段；OneDrive 工作階段約數天後過期、Google 約 1 週。Google 文件／試算表／簡報（原生格式）無法直接下載。
+- **OneDrive / Google Drive**：上傳工作階段必須依序上傳，因此每個檔案只用 1 個並行分段；瀏覽器直傳需要服務端允許 CORS（OneDrive 上傳網址與以 Origin 建立的 Google 工作階段都支援，失敗會自動改走 Worker）；OneDrive 工作階段約數天後過期、Google 約 1 週。Google 文件／試算表／簡報（原生格式）無法直接下載。
 - **Telegram**：官方 Bot API 單一分段 ≤ 20 MB；Bot 在私人對話只能刪除 48 小時內的訊息（請使用頻道）；刪除儲存空間不會刪除頻道內的訊息。
 - **Discord**：每段 ≤ 10 MiB（未加成伺服器）；大量上傳會觸發速率限制（已自動退避，但速度有限）；刪除儲存空間不會刪除訊息。Telegram / Discord 的目錄結構只存在 D1，請定期備份 D1。
 - **HuggingFace**：僅支援 Dataset repo；每次寫入都是一個 commit（Hub 有 commit 頻率限制）。網頁上傳大檔會分段直傳、可續傳，但需先在瀏覽器計算整檔 SHA-256（數 GB 的檔案需要一些時間）；WebDAV PUT 單檔上限 100 MiB。

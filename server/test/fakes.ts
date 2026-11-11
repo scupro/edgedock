@@ -196,7 +196,7 @@ export function gdriveFake(opts: { publicKey?: CryptoKey } = {}) {
     data?: Uint8Array;
   }
   const files = new Map<string, F>();
-  const sessions = new Map<string, { meta: { name: string; parents?: string[] }; fileId?: string; size: number; data: Uint8Array; mime: string }>();
+  const sessions = new Map<string, { meta: { name: string; parents?: string[] }; fileId?: string; size: number; data: Uint8Array; mime: string; origin: string | null }>();
   const calls: string[] = [];
   const state = { tokens: 0, jwtOk: 0 };
   let ids = 0;
@@ -215,10 +215,13 @@ export function gdriveFake(opts: { publicKey?: CryptoKey } = {}) {
       state.tokens++;
       return json({ access_token: `g${state.tokens}`, expires_in: 3600 });
     }
-    if (req.headers.get('authorization') !== `Bearer g${state.tokens}`) return json({ error: { message: 'auth' } }, 401);
     const path = u.pathname;
-    if (path === '/upload/drive/v3/files' && u.searchParams.get('upload_id')) {
-      const s = sessions.get(u.searchParams.get('upload_id')!)!;
+    // the session URI itself authorizes chunk PUTs (browsers send none); a bearer token, if sent, must be valid
+    const sessionPut = path === '/upload/drive/v3/files' && !!u.searchParams.get('upload_id');
+    if ((!sessionPut || req.headers.get('authorization')) && req.headers.get('authorization') !== `Bearer g${state.tokens}`) return json({ error: { message: 'auth' } }, 401);
+    if (sessionPut) {
+      const s = sessions.get(u.searchParams.get('upload_id')!);
+      if (!s) return json({ error: { message: 'no such session' } }, 404);
       const cr = req.headers.get('content-range')!;
       if (/^bytes \*\//.test(cr)) {
         if (s.data.length === s.size) return json({ id: s.fileId });
@@ -237,7 +240,7 @@ export function gdriveFake(opts: { publicKey?: CryptoKey } = {}) {
       const fileId = path.split('/')[5];
       if (u.searchParams.get('uploadType') === 'resumable') {
         const sid = `u${++ids}`;
-        sessions.set(sid, { meta: (await req.json()) as { name: string }, fileId, size: Number(req.headers.get('x-upload-content-length')), data: new Uint8Array(0), mime: req.headers.get('x-upload-content-type') ?? '' });
+        sessions.set(sid, { meta: (await req.json()) as { name: string }, fileId, size: Number(req.headers.get('x-upload-content-length')), data: new Uint8Array(0), mime: req.headers.get('x-upload-content-type') ?? '', origin: req.headers.get('origin') });
         return new Response(null, { status: 200, headers: { location: `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=${sid}` } });
       }
       // multipart/related
@@ -297,7 +300,7 @@ export function gdriveFake(opts: { publicKey?: CryptoKey } = {}) {
     }
     return json({ error: { message: `unhandled ${req.method} ${path}` } }, 500);
   }, calls);
-  return { fetch, calls, files, state };
+  return { fetch, calls, files, state, sessions };
 }
 
 // ---------------------------------------------------------------- Telegram Bot API

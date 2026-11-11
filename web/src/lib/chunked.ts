@@ -371,8 +371,18 @@ export async function uploadMultipart(
         signed.delete(n);
         return new UploadError(`Part ${n} checksum mismatch`, 'checksum', 422, true);
       }
+      // session-style providers (OneDrive / Google Drive) answer the final chunk with the created item
+      let etagOrItem = r.etag;
+      if (!etagOrItem && n === s.totalParts && (r.status === 200 || r.status === 201)) {
+        try {
+          const id = (JSON.parse(r.text) as { id?: string })?.id;
+          if (id) etagOrItem = `item:${id}`;
+        } catch {
+          /* not JSON */
+        }
+      }
       try {
-        await T.api(`/api/upload/multipart/${s.id}/parts/${n}/ack`, { body: { etag: r.etag, size: blob.size, md5: sum?.hex } });
+        await T.api(`/api/upload/multipart/${s.id}/parts/${n}/ack`, { body: { etag: etagOrItem, size: blob.size, md5: sum?.hex } });
       } catch (e) {
         const st = (e as { status?: number }).status ?? 0;
         return new UploadError((e as Error).message, 'http', st, RETRIABLE_STATUS.has(st) || st === 422);

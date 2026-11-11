@@ -11,6 +11,8 @@ import { Vfs } from '../storage/mounts';
 export const uploadRoutes = new Hono<AppEnv>();
 
 const MiB = 1024 * 1024;
+/** session-style storages (OneDrive / Google Drive) upload files above this straight from the browser */
+const DIRECT_SESSION_MIN = 4 * MiB;
 
 /**
  * Decide how the browser should upload a file:
@@ -49,7 +51,9 @@ uploadRoutes.post('/plan', async (c) => {
   const canDirect = !noDirect && caps.presign;
   // single-request writes are buffered by some drivers (HuggingFace): above that, always multipart
   const mustChunk = caps.maxWriteSize !== undefined && size > Math.min(caps.maxWriteSize, chunkAbove);
-  if (size > chunkAbove || mustChunk) {
+  // OneDrive / Google Drive: anything above a few MiB goes browser → provider session directly
+  const directSession = directParts && !!caps.sequentialParts && size > DIRECT_SESSION_MIN;
+  if (size > chunkAbove || mustChunk || directSession) {
     return c.json({ ...base, strategy: 'multipart', direct: directParts, sha256: !!caps.needsSha256 });
   }
   if (canDirect && driver.presignPut) {
