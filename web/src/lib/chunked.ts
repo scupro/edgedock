@@ -276,6 +276,8 @@ export async function uploadMultipart(
   const signBatch = Math.max(1, s.signBatch ?? 1);
   const signed = new Map<number, SignedPart>();
   let signing: Promise<void> | null = null;
+  /** set when a presigned URL expired: the next sign call asks the server for fresh URLs */
+  let refreshUrls = false;
   /** fetch (batched) direct URLs until part n has one, or the server says it is already uploaded */
   const signFor = async (n: number): Promise<SignedPart | 'done'> => {
     for (let i = 0; i < 3; i++) {
@@ -286,7 +288,9 @@ export async function uploadMultipart(
         const want = [n];
         for (let k = n + 1; k <= s.totalParts && want.length < signBatch; k++) if (!done.has(k) && !signed.has(k)) want.push(k);
         signing = (async () => {
-          const r = await T.api<SignResponse>(`/api/upload/multipart/${s.id}/sign`, { body: { partNumbers: want } });
+          const refresh = refreshUrls;
+          refreshUrls = false;
+          const r = await T.api<SignResponse>(`/api/upload/multipart/${s.id}/sign`, { body: refresh ? { partNumbers: want, refresh } : { partNumbers: want } });
           if (r.reset) {
             // parts recorded so far belong to an upload the provider dropped; the completion check re-sends them
             done.clear();
@@ -361,6 +365,7 @@ export async function uploadMultipart(
         if (isExpired(r)) {
           // presigned URLs expired (e.g. long pause / resume next day): drop them all and re-sign
           signed.clear();
+          refreshUrls = true;
           return new UploadError(`Part ${n}: upload URL expired, re-signing`, 'http', r.status, true);
         }
         return err;

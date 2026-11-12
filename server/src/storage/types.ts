@@ -111,7 +111,8 @@ export interface MultipartSupport {
   create(path: string, opts: MultipartCreateOptions): Promise<string | MultipartCreated>;
   presignPart?(path: string, uploadId: string, partNumber: number, expiresIn: number): Promise<PresignedRequest>;
   /** sign many parts with one provider call (HuggingFace: one LFS batch request returns every part URL) */
-  presignParts?(path: string, uploadId: string, partNumbers: number[], expiresIn: number): Promise<PresignedParts>;
+  /** `refresh`: the browser saw the previous URLs expire, so cached URLs must not be handed out again */
+  presignParts?(path: string, uploadId: string, partNumbers: number[], expiresIn: number, opts?: { refresh?: boolean }): Promise<PresignedParts>;
   /** `md5` (base64) is forwarded as Content-MD5 where the provider verifies it. */
   uploadPart(path: string, uploadId: string, partNumber: number, body: WriteBody, size: number, opts?: { md5?: string }): Promise<{ etag: string }>;
   /** may return the final checksum to record (e.g. "sha256:<oid>") */

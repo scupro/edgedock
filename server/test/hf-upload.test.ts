@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UploadControl, uploadMultipart, type PutResult, type Transport } from '../../web/src/lib/chunked';
 import { sha256OfBlob } from '../../web/src/lib/sha256core';
 import { registerDriver } from '../src/storage/registry';
-import { huggingfaceDefinition } from '../src/storage/huggingface';
+import { huggingfaceDefinition, presignedExpiry } from '../src/storage/huggingface';
 import { hfFake } from './fakes';
 import { makeApp, makeEnv } from './helpers';
 
@@ -132,8 +132,8 @@ describe('HuggingFace Dataset large uploads (LFS multipart)', () => {
     expect(res.session.partSize).toBe(CHUNK);
     expect(log.direct).toBe(6);
     expect(log.proxied).toBe(0);
-    // one batch for create + one for signing all parts (not one per part)
-    expect(t.f.mp.batches).toBe(2);
+    // only the creating batch call: signing reuses its URLs (another batch would restart the upload on the Hub)
+    expect(t.f.mp.batches).toBe(1);
     const done = t.f.mp.completions[0];
     expect(done.oid).toBe(oid);
     expect(done.parts.map((p) => p.partNumber)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -178,7 +178,7 @@ describe('HuggingFace Dataset large uploads (LFS multipart)', () => {
     expect(res.ok).toBe(true);
     // part 3 hit an expired URL once, then everything was re-signed with one more batch
     expect(log.direct).toBe(7);
-    expect(t.f.mp.batches).toBe(3);
+    expect(t.f.mp.batches).toBe(2);
     // the same S3 multipart upload kept every part (1..6 once each)
     expect(new Set(t.f.mp.partPuts).size).toBe(6);
     expect(Buffer.compare(Buffer.from(await readBack(t, '/hf/exp.bin')), Buffer.from(b))).toBe(0);
@@ -241,7 +241,9 @@ describe('HuggingFace Dataset large uploads (LFS multipart)', () => {
     const { T: T2, log } = transport(t);
     const res = await uploadMultipart(file, '/hf/resume.bin', { transport: T2, direct: true, sha256: oid });
     expect(res.session.resumed).toBe(true);
-    expect(log.direct).toBe(4); // parts 4..7 only
+    // parts 4..7 only (+ at most one 403 per concurrent slot on the stale cached URLs before the refresh)
+    expect(log.direct).toBeGreaterThanOrEqual(4);
+    expect(log.direct).toBeLessThanOrEqual(7);
     expect(Buffer.compare(Buffer.from(await readBack(t, '/hf/resume.bin')), Buffer.from(b))).toBe(0);
   });
 
@@ -264,11 +266,32 @@ describe('HuggingFace Dataset large uploads (LFS multipart)', () => {
     const { T } = transport(t);
     await expect(uploadMultipart(file, '/hf/rs.bin', { transport: T, direct: true, sha256: oid, concurrency: 1, control: ctl, onPartDone: (n) => n === 2 && ctl.cancel() })).rejects.toThrow();
     t.f.mp.uploadSeq++; // next batch hands out a new S3 upload id
+    t.f.mp.gen++; // …and the cached URLs have expired, so the resume has to run a batch
     const { T: T2, log } = transport(t);
     const res = await uploadMultipart(file, '/hf/rs.bin', { transport: T2, direct: true, sha256: oid });
     expect(res.ok).toBe(true);
-    expect(log.direct).toBe(4);
+    expect(log.direct).toBeGreaterThanOrEqual(4);
+    expect(log.direct).toBeLessThanOrEqual(7);
     expect(Buffer.compare(Buffer.from(await readBack(t, '/hf/rs.bin')), Buffer.from(b))).toBe(0);
+  });
+
+  it('Hub starts a new S3 upload on every batch call: signing never re-batches, so no part is lost', async () => {
+    t.f.mp.restartEveryBatch = true;
+    const b = data(7 * CHUNK + 99, 12);
+    const oid = sha(b);
+    const { T, log } = transport(t);
+    const res = await uploadMultipart(fileOf(b), '/hf/real.bin', { transport: T, direct: true, sha256: oid, concurrency: 3 });
+    expect(res.ok).toBe(true);
+    expect(t.f.mp.batches).toBe(1);
+    expect(log.direct).toBe(8);
+    expect(t.f.mp.completions.at(-1)!.parts.map((p) => p.partNumber)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(Buffer.compare(Buffer.from(await readBack(t, '/hf/real.bin')), Buffer.from(b))).toBe(0);
+  });
+
+  it('presigned expiry is read from X-Amz-Date + X-Amz-Expires', () => {
+    const u = 'https://s3.example/x?X-Amz-Date=20261112T100000Z&X-Amz-Expires=86400&uploadId=1';
+    expect(presignedExpiry([u])).toBe(Date.UTC(2026, 10, 13, 10, 0, 0));
+    expect(presignedExpiry(['https://s3.example/no-sig'], 1000, 5)).toBe(1005);
   });
 
   it('init without sha256 is refused for HuggingFace', async () => {

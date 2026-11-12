@@ -132,8 +132,10 @@ function xhrPut(url: string, body: Blob, headers: Record<string, string>, o: { o
       o.signal.removeEventListener('abort', onAbort);
       resolve(r);
     };
+    // read only headers the response exposes (CORS), so the console stays free of "unsafe header" errors
+    const header = (name: string) => (new RegExp(`^${name}:`, 'im').test(xhr.getAllResponseHeaders()) ? xhr.getResponseHeader(name) : null);
     xhr.onload = () =>
-      done({ status: xhr.status, etag: xhr.getResponseHeader('etag'), text: xhr.responseText, retryAfter: Number(xhr.getResponseHeader('retry-after')) || null });
+      done({ status: xhr.status, etag: header('etag'), text: xhr.responseText, retryAfter: Number(header('retry-after')) || null });
     xhr.onerror = () => done({ status: 0, etag: null, text: '' });
     xhr.ontimeout = () => done({ status: -2, etag: null, text: '' });
     xhr.onabort = () => done({ status: timedOut ? -2 : -1, etag: null, text: '' });

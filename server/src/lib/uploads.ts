@@ -215,7 +215,7 @@ export class UploadService {
    * part URLs, OneDrive / Google Drive session URLs). Also reports parts the provider already holds
    * (`uploaded`) and whether the provider restarted the upload (`reset`: recorded parts were dropped).
    */
-  async signParts(id: string, partNumbers: number[], expiresIn = 3600): Promise<{ urls: Record<number, PresignedRequest>; uploaded?: number[]; reset?: boolean }> {
+  async signParts(id: string, partNumbers: number[], expiresIn = 3600, refresh = false): Promise<{ urls: Record<number, PresignedRequest>; uploaded?: number[]; reset?: boolean }> {
     const { session, parts } = await this.get(id);
     this.assertActive(session);
     const { driver } = this.storageOf(session);
@@ -233,7 +233,7 @@ export class UploadService {
     }
     const todo = wanted.filter((n) => !uploaded?.includes(n));
     if (mp.presignParts) {
-      const r = await mp.presignParts(session.object_key, session.upstream_upload_id!, todo, expiresIn);
+      const r = await mp.presignParts(session.object_key, session.upstream_upload_id!, todo, expiresIn, { refresh });
       Object.assign(out, r.urls);
       if (r.uploadId && r.uploadId !== session.upstream_upload_id) {
         await this.env.DB.prepare('UPDATE upload_sessions SET upstream_upload_id = ?, updated_at = ? WHERE id = ?').bind(r.uploadId, Date.now(), id).run();

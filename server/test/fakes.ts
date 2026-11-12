@@ -419,6 +419,8 @@ export interface HfMultipartState {
   partPuts: string[];
   completions: { oid: string; parts: { partNumber: number; etag: string }[] }[];
   batches: number;
+  /** real Hub behaviour: every batch call starts a new S3 multipart upload */
+  restartEveryBatch?: boolean;
 }
 
 export function hfFake(repo = 'me/data', kind = 'datasets', mpOpts: { chunkSize?: number } = {}) {
@@ -521,6 +523,7 @@ export function hfFake(repo = 'me/data', kind = 'datasets', mpOpts: { chunkSize?
     }
     if (p === `/${kind}/${repo}.git/info/lfs/objects/batch`) {
       mp.batches++;
+      if (mp.restartEveryBatch && mp.batches > 1) mp.uploadSeq++;
       const b = (await req.json()) as { objects: { oid: string; size: number }[]; transfers: string[]; hash_algo: string; ref?: { name: string } };
       if (req.headers.get('accept') !== 'application/vnd.git-lfs+json' || b.hash_algo !== 'sha_256' || !b.transfers.includes('multipart')) return json({ error: 'bad batch request' }, 400);
       return json({

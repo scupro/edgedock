@@ -174,8 +174,8 @@ uploadRoutes.post('/multipart/:id/sign', async (c) => {
   const service = await svc(c);
   const s = await service.get(c.req.param('id'));
   checkOwner(c.get('principal'), s.session);
-  const { partNumbers } = await c.req.json<{ partNumbers: number[] }>();
-  return c.json(await service.signParts(s.session.id, partNumbers ?? []));
+  const { partNumbers, refresh } = await c.req.json<{ partNumbers: number[]; refresh?: boolean }>();
+  return c.json(await service.signParts(s.session.id, partNumbers ?? [], 3600, !!refresh));
 });
 
 uploadRoutes.put('/multipart/:id/parts/:n', async (c) => {

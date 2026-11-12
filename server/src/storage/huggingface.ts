@@ -12,8 +12,9 @@
  *      no `actions` = object already on the Hub (nothing to upload); `header.chunk_size` = S3 multipart,
  *      the numbered header keys are presigned part URLs and `actions.upload.href` the completion URL;
  *      otherwise one presigned PUT (basic);
- *   3. the browser PUTs the parts straight to the presigned URLs (`presignParts` re-runs the batch for
- *      fresh URLs; parts can also be proxied through the Worker via `uploadPart`);
+ *   3. the browser PUTs the parts straight to the presigned URLs (`presignParts` hands out the URLs cached
+ *      from the creating batch call: every batch call makes the Hub start a NEW S3 multipart upload, so
+ *      the batch is only re-run once those URLs expire; parts can also be proxied through the Worker via `uploadPart`);
  *   4. `complete` POSTs {oid, parts:[{partNumber, etag}]} to the completion URL, then commits `lfsFile`.
  * The session's upload id is a JSON blob {oid, size, t, href, uid, cs} kept in D1.
  * Single-request writes (`write`: proxy PUT, WebDAV, copy) are buffered in the Worker, so they are
@@ -70,6 +71,42 @@ export interface LfsSession {
   uid?: string;
   /** chunk size (multipart) */
   cs?: number;
+  /**
+   * part number → presigned URL, kept from the batch call that created the upload. Every new batch call
+   * makes the Hub start a NEW S3 multipart upload (new uploadId), so signing must reuse these URLs and
+   * only re-run the batch once they expire.
+   */
+  urls?: Record<number, string>;
+  /** epoch ms when `urls` stop being valid */
+  exp?: number;
+}
+
+/** Earliest expiry of SigV4 presigned URLs (X-Amz-Date + X-Amz-Expires); falls back to `fallbackMs` from now. */
+export function presignedExpiry(urls: string[], now = Date.now(), fallbackMs = 15 * 60 * 1000): number {
+  let min = Infinity;
+  for (const u of urls) {
+    try {
+      const q = new URL(u).searchParams;
+      const d = q.get('X-Amz-Date');
+      const e = Number(q.get('X-Amz-Expires'));
+      const m = d && /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(d);
+      if (m && e > 0) min = Math.min(min, Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) + e * 1000);
+    } catch {
+      /* not a URL */
+    }
+  }
+  return Number.isFinite(min) ? min : now + fallbackMs;
+}
+
+/** keep cached URLs only while the session blob stays well under D1's 2 MB value limit */
+const MAX_CACHED_URL_BYTES = 1_000_000;
+const URL_SAFETY_MS = 5 * 60 * 1000;
+
+function withCachedUrls(s: LfsSession, parts: Record<number, string>): LfsSession {
+  if (s.t !== 'multipart') return s;
+  const list = Object.values(parts);
+  if (list.reduce((a, u) => a + u.length + 8, 0) > MAX_CACHED_URL_BYTES) return s;
+  return { ...s, urls: { ...parts }, exp: presignedExpiry(list) };
 }
 
 interface BatchObject {
@@ -146,7 +183,7 @@ export class HuggingFaceDriver extends BaseDriver {
         if (!u) throw new ProviderError(409, `HuggingFace LFS: no URL for part ${n}`);
         return u;
       },
-      presignParts: (p, id, ns, exp) => this.mpPresignParts(p, id, ns, exp),
+      presignParts: (p, id, ns, exp, o) => this.mpPresignParts(p, id, ns, exp, o?.refresh),
       uploadPart: (p, id, n, body, size) => this.mpUploadPart(p, id, n, body, size),
       complete: (p, id, parts) => this.mpComplete(p, id, parts),
       // the Hub has no abort for LFS multipart uploads; unfinished uploads expire on its side
@@ -297,6 +334,12 @@ export class HuggingFaceDriver extends BaseDriver {
     return { session: { oid, size, t: 'basic', href: up.href }, parts: { 1: up.href }, basicHeaders: header, verify: obj.actions?.verify };
   }
 
+  /** the cached part URLs of a multipart session, while they are still valid */
+  private cachedUrls(s: LfsSession): Record<number, string> | undefined {
+    if (s.t !== 'multipart' || !s.urls || !s.exp || s.exp - Date.now() < URL_SAFETY_MS) return undefined;
+    return s.urls;
+  }
+
   private parseSession(id: string): LfsSession {
     try {
       const s = JSON.parse(id) as LfsSession;
@@ -321,7 +364,7 @@ export class HuggingFaceDriver extends BaseDriver {
     if (mode !== 'lfs') throw new HttpError(400, 'The Hub wants this file stored as a regular (non-LFS) git file, which EdgeDock can only commit in one request (≤ 100 MiB). Add an LFS rule to .gitattributes for it or upload it with huggingface-cli.', 'hf_regular_too_large');
     const plan = await this.lfsBatch(oid, size);
     const { partSize, totalParts } = this.layout(plan.session);
-    const created: MultipartCreated = { uploadId: JSON.stringify(plan.session), partSize, totalParts, checksum: `sha256:${oid}` };
+    const created: MultipartCreated = { uploadId: JSON.stringify(withCachedUrls(plan.session, plan.parts)), partSize, totalParts, checksum: `sha256:${oid}` };
     if (plan.session.t === 'exists') {
       created.uploadedParts = [{ partNumber: 1, etag: 'lfs-exists', size: partSize }];
     }
@@ -335,11 +378,18 @@ export class HuggingFaceDriver extends BaseDriver {
   }
 
   /** One batch call → fresh URLs for the requested parts (presigned URLs expire). */
-  private async mpPresignParts(_path: string, id: string, partNumbers: number[], expiresIn: number): Promise<PresignedParts> {
+  private async mpPresignParts(_path: string, id: string, partNumbers: number[], expiresIn: number, refresh = false): Promise<PresignedParts> {
     const cur = this.parseSession(id);
     if (cur.t === 'exists') return { urls: {}, alreadyComplete: true };
+    const cached = refresh ? undefined : this.cachedUrls(cur);
+    if (cached) {
+      // reuse the URLs of the upload already in progress: a new batch call would restart it on the Hub
+      const urls: Record<number, PresignedRequest> = {};
+      for (const n of partNumbers) if (cached[n]) urls[n] = { url: cached[n], method: 'PUT', headers: {}, expiresIn: Math.max(1, Math.floor((cur.exp! - Date.now()) / 1000)) };
+      return { urls };
+    }
     const plan = await this.lfsBatch(cur.oid, cur.size);
-    const next = plan.session;
+    const next = withCachedUrls(plan.session, plan.parts);
     if (next.t === 'exists') return { urls: {}, uploadId: JSON.stringify(next), alreadyComplete: true };
     const restarted = next.t !== cur.t || next.cs !== cur.cs || (!!cur.uid && !!next.uid && cur.uid !== next.uid);
     const urls: Record<number, PresignedRequest> = {};
@@ -354,8 +404,8 @@ export class HuggingFaceDriver extends BaseDriver {
   private async mpUploadPart(_path: string, id: string, n: number, body: WriteBody, size: number): Promise<{ etag: string }> {
     const cur = this.parseSession(id);
     if (cur.t === 'exists') return { etag: 'lfs-exists' };
-    const plan = await this.lfsBatch(cur.oid, cur.size);
-    const u = this.presigned(plan, n, 3600);
+    const cached = this.cachedUrls(cur)?.[n];
+    const u = cached ? { url: cached, headers: {} as Record<string, string> } : this.presigned(await this.lfsBatch(cur.oid, cur.size), n, 3600);
     if (!u) throw new ProviderError(409, `HuggingFace LFS: no URL for part ${n}`);
     const fb = fetchBody(body, size);
     const res = await this.fetchFn(u.url, { method: 'PUT', headers: { ...u.headers, ...fb.headers }, body: fb.body, ...fb.init } as RequestInit);
