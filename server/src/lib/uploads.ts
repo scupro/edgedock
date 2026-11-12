@@ -2,7 +2,7 @@ import { TMP_DIR } from '../storage/base';
 import type { Resolved, Vfs } from '../storage/mounts';
 import type { MultipartCreated, PresignedRequest, StorageDriver, WriteBody } from '../storage/types';
 import { uuid } from './crypto';
-import { badRequest, classifyUpstream, gone, HttpError, notFound, RetriableError } from './errors';
+import { badRequest, classifyUpstream, gone, HttpError, notFound, RetriableError, upstreamClientStatus } from './errors';
 import { fromBase64, md5Tap, multipartEtag, toHex } from './md5';
 import { normalizePath } from './path';
 import type { Env } from './types';
@@ -78,7 +78,7 @@ function rethrowUpstream(e: unknown, what: string): never {
   const k = classifyUpstream(e);
   const msg = (e as Error)?.message ?? String(e);
   if (k.retriable) throw new RetriableError(`${what} failed temporarily (${k.status || 'network'}): ${msg}`, k.status === 429 ? 5 : undefined);
-  throw new HttpError(k.status >= 400 && k.status < 500 ? k.status : 502, `${what} failed: ${msg}`, 'upstream');
+  throw new HttpError(upstreamClientStatus(k.status), `${what} failed: ${msg}`, 'upstream');
 }
 
 export function expectedPartSize(s: Pick<UploadSessionRow, 'size' | 'part_size' | 'total_parts'>, n: number): number {

@@ -40,3 +40,14 @@ export function classifyUpstream(err: unknown): { retriable: boolean; status: nu
   if (status === 408 || status === 425 || status === 429 || status >= 500) return { retriable: true, status };
   return { retriable: false, status };
 }
+
+/**
+ * Status we return to our own clients for a non-retriable upstream failure. A provider's 401/403
+ * (bad token, missing permission) must never surface as our 401 (that logs the user out) nor as a
+ * 5xx (clients retry those): it becomes 424 Failed Dependency. 404/409/410/412/413/416 keep their meaning.
+ */
+export function upstreamClientStatus(status: number): number {
+  if ([404, 409, 410, 412, 413, 416].includes(status)) return status;
+  if (status >= 400 && status < 500) return 424;
+  return 502;
+}

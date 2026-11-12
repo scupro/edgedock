@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { principalMiddleware } from './lib/auth';
 import { corsMiddleware } from './lib/cors';
-import { HttpError, RetriableError } from './lib/errors';
+import { classifyUpstream, HttpError, RetriableError, upstreamClientStatus } from './lib/errors';
 import type { AppEnv, Runtime } from './lib/types';
 import { adminRoutes } from './routes/admin';
 import { authRoutes } from './routes/auth';
@@ -57,7 +57,16 @@ export function createApp(runtime: Runtime) {
     }
     if (err instanceof HttpError) return c.json({ error: err.message, code: err.code }, err.status as 400);
     const status = (err as { status?: number }).status;
-    if (status && status >= 400 && status < 600) return c.json({ error: err.message, code: 'upstream' }, (status === 404 ? 404 : 502) as 502);
+    if (status && status >= 400 && status < 600) {
+      const k = classifyUpstream(err);
+      if (k.retriable) {
+        if (status === 429) c.header('Retry-After', '5');
+        c.header('X-EdgeDock-Retriable', '1');
+        return c.json({ error: err.message, code: 'upstream', retriable: true }, (status === 429 ? 503 : 502) as 502);
+      }
+      // provider rejected the request (bad token, no permission, bad input): retrying will not help
+      return c.json({ error: err.message, code: 'upstream', retriable: false }, upstreamClientStatus(status) as 400);
+    }
     console.error('[edgedock]', err);
     return c.json({ error: err.message || 'Internal error', code: 'internal' }, 500);
   });

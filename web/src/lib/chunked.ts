@@ -184,7 +184,8 @@ export function classify(r: PutResult): UploadError | null {
   try {
     const j = JSON.parse(r.text);
     if (j?.error) msg = j.error;
-    if (j?.retriable) retriable = true;
+    if (j?.retriable === true) retriable = true;
+    if (j?.retriable === false) retriable = false;
   } catch {
     const m = /<Message>([^<]+)<\/Message>/.exec(r.text);
     if (m) msg = m[1];

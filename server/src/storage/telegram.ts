@@ -52,7 +52,13 @@ export class TelegramDriver extends PartStoreDriver {
   private async call<T>(name: string, init: () => RequestInit): Promise<T> {
     const res = await fetchRetry(this.fetchFn, this.method(name), init);
     const j = (await res.json().catch(() => null)) as { ok: boolean; result?: T; description?: string; error_code?: number } | null;
-    if (!j?.ok) throw new ProviderError(j?.error_code ?? res.status, `Telegram ${name}: ${j?.description ?? res.status}`);
+    if (!j?.ok) {
+      const code = j?.error_code ?? res.status;
+      // a wrong/truncated token answers 401 Unauthorized, or 404 Not Found for a malformed one
+      if (code === 401 || (code === 404 && name !== 'getFile'))
+        throw new ProviderError(401, `Telegram Bot Token 無效或不完整，請確認是否完整複製（${j?.description ?? code}）`);
+      throw new ProviderError(code, `Telegram ${name}: ${j?.description ?? res.status}`);
+    }
     return j.result as T;
   }
 
