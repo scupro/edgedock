@@ -1,5 +1,6 @@
 /** Markdown rendering via Vditor (GFM, KaTeX math, mermaid, flowchart, mindmap, …). */
 import { locale } from './i18n';
+import { darkActive } from './theme';
 
 /**
  * Vditor loads Lute, KaTeX, mermaid … at runtime from this base URL. By default the
@@ -8,7 +9,8 @@ import { locale } from './i18n';
  */
 export const VDITOR_CDN = (import.meta.env.VITE_VDITOR_CDN as string | undefined) || `${location.origin}/vendor/vditor`;
 
-export const isDark = () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+/** follows the app's light / dark toggle (which itself may follow the system) */
+export const isDark = () => darkActive.value;
 
 export function vditorLang(): 'zh_TW' | 'en_US' {
   return locale.value === 'zh-TW' ? 'zh_TW' : 'en_US';

@@ -4,6 +4,10 @@ import { useRoute, useRouter } from 'vue-router';
 import UploadPanel from './components/UploadPanel.vue';
 import { locale, setLocale, t, type Locale } from './lib/i18n';
 import { isAdmin, logout, store } from './lib/store';
+import { cycleTheme, themeMode } from './lib/theme';
+
+const themeIcon = computed(() => ({ system: '🖥', light: '☀️', dark: '🌙' })[themeMode.value]);
+const themeLabel = computed(() => `${t('theme.label')}: ${t(`theme.${themeMode.value}`)}`);
 
 const route = useRoute();
 const router = useRouter();
@@ -47,6 +51,7 @@ function changeLocale(e: Event) {
       </nav>
       <span class="spacer" />
       <button v-if="installEvt" class="small" @click="install">⬇ {{ t('pwa.install') }}</button>
+      <button class="small theme-toggle" :title="themeLabel" :aria-label="themeLabel" @click="cycleTheme">{{ themeIcon }}</button>
       <select :value="locale" @change="changeLocale" style="width: auto" aria-label="Language">
         <option value="zh-TW">正體中文</option>
         <option value="en">English</option>

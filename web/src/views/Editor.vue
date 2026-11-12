@@ -7,6 +7,7 @@ import { exportDocx, exportHtml, exportMarkdown, exportPdf, exportPng } from '..
 import { joinPath } from '../lib/format';
 import { t } from '../lib/i18n';
 import { isDark, loadVditor, VDITOR_CDN, vditorLang } from '../lib/markdown';
+import { darkActive } from '../lib/theme';
 import { toast } from '../lib/store';
 
 const route = useRoute();
@@ -102,6 +103,10 @@ async function init() {
 }
 
 onMounted(init);
+// follow the light / dark toggle without reloading the editor
+watch(darkActive, (dark) => {
+  vditor?.setTheme(dark ? 'dark' : 'classic', dark ? 'dark' : 'light', dark ? 'github-dark' : 'github', `${VDITOR_CDN}/dist/css/content-theme`);
+});
 onBeforeUnmount(() => vditor?.destroy());
 watch(
   () => route.fullPath,

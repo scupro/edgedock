@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { darkActive } from '../lib/theme';
 import { useRoute } from 'vue-router';
 import Preview from '../components/Preview.vue';
 import { ApiError, api, apiUrl } from '../lib/api';
@@ -31,6 +32,10 @@ async function loadContent() {
     await renderMarkdown(mdEl.value!, content.value.content);
   }
 }
+
+watch(darkActive, () => {
+  if (meta.value?.type === 'markdown' && content.value?.content && mdEl.value) void renderMarkdown(mdEl.value, content.value.content);
+});
 
 async function init() {
   try {

@@ -5,6 +5,10 @@ export type Locale = 'zh-TW' | 'en';
 
 const zhTW = {
   'app.name': 'EdgeDock',
+  'theme.label': '外觀',
+  'theme.system': '跟隨系統',
+  'theme.light': '淺色',
+  'theme.dark': '深色',
   'nav.files': '檔案',
   'nav.editor': 'Markdown 編輯器',
   'nav.shares': '分享',
@@ -217,6 +221,10 @@ const zhTW = {
 
 const en: Record<keyof typeof zhTW, string> = {
   'app.name': 'EdgeDock',
+  'theme.label': 'Theme',
+  'theme.system': 'System',
+  'theme.light': 'Light',
+  'theme.dark': 'Dark',
   'nav.files': 'Files',
   'nav.editor': 'Markdown',
   'nav.shares': 'Shares',

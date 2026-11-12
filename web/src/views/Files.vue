@@ -5,7 +5,7 @@ import Modal from '../components/Modal.vue';
 import Preview from '../components/Preview.vue';
 import ShareDialog from '../components/ShareDialog.vue';
 import { api, signFile, type FileEntry } from '../lib/api';
-import { fileIcon, MARKDOWN } from '../lib/fileTypes';
+import { fileIcon, MARKDOWN, previewKind } from '../lib/fileTypes';
 import { extOf, formatDate, formatSize, joinPath, parentPath } from '../lib/format';
 import { locale, t } from '../lib/i18n';
 import { isAdmin, toast } from '../lib/store';
@@ -212,7 +212,7 @@ const isMd = (e: FileEntry) => MARKDOWN.includes(extOf(e.name));
             <tr v-for="e in shown" :key="e.path" class="clickable" @click="open(e)">
               <td @click.stop><input type="checkbox" :checked="selected.has(e.path)" @change="toggle(e.path)" /></td>
               <td>
-                <span style="margin-right: 0.4rem">{{ fileIcon(e.name, e.isDir) }}</span>{{ e.name }}
+                <span class="ficon" :class="`k-${e.isDir ? 'dir' : previewKind(e.name)}`">{{ fileIcon(e.name, e.isDir) }}</span>{{ e.name }}
                 <div v-if="searchResults" class="muted mono">{{ e.path }}</div>
               </td>
               <td class="hide-sm muted">{{ e.isDir ? '—' : formatSize(e.size) }}</td>
