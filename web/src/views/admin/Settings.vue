@@ -74,6 +74,7 @@ async function changePassword() {
         <label class="field"><span>{{ t('settings.uploadRetries') }}</span><input v-model.number="s.uploadRetries" type="number" min="1" max="10" /></label>
         <label class="field"><span>{{ t('settings.uploadChunkTimeoutSec') }}</span><input v-model.number="s.uploadChunkTimeoutSec" type="number" min="10" /></label>
         <label class="field"><span>{{ t('settings.proxyMaxChunkMB') }}</span><input v-model.number="s.proxyMaxChunkMB" type="number" min="5" max="95" /></label>
+        <label class="check"><input type="checkbox" v-model="s.nightlyIndex" />{{ t('settings.nightlyIndex') }}</label>
         <label class="field"><span>{{ t('settings.externalPreviewExts') }}</span><input v-model="s.externalPreviewExts" class="mono" /></label>
       </div>
       <label class="field">

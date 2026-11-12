@@ -26,6 +26,8 @@ export interface Settings {
   uploadChunkTimeoutSec: number;
   /** Hard cap for any request body sent through the Worker (MiB). Workers Free/Pro accept 100 MB. */
   proxyMaxChunkMB: number;
+  /** Rebuild the filename search index every night (cron). Manual rebuild always works. */
+  nightlyIndex: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -42,6 +44,7 @@ export const DEFAULT_SETTINGS: Settings = {
   uploadRetries: 5,
   uploadChunkTimeoutSec: 120,
   proxyMaxChunkMB: 50,
+  nightlyIndex: true,
 };
 
 /** Workers request body limit on Free/Pro plans is 100 MB; stay well below it. */

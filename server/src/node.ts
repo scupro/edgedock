@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { createApp } from './app';
 import { SqliteD1 } from './db/sqlite-d1';
 import { runCleanup, runIndexInline, runSyncInline } from './jobs/tasks';
+import { getSettings } from './lib/settings';
 import type { AppEnv, Env, Runtime } from './lib/types';
 import { localDefinition } from './storage/local';
 import { registerDriver } from './storage/registry';
@@ -79,7 +80,9 @@ const cleanupMs = Number(process.env.CLEANUP_INTERVAL_MIN ?? 30) * 60_000;
 const indexMs = Number(process.env.INDEX_INTERVAL_MIN ?? 24 * 60) * 60_000;
 setInterval(() => background('cleanup', () => runCleanup(env)), cleanupMs).unref();
 setInterval(() => {
-  background('index', () => runIndexInline(env));
+  getSettings(env).then((st) => {
+    if (st.nightlyIndex) background('index', () => runIndexInline(env));
+  });
   db.prepare('SELECT id FROM sync_jobs WHERE enabled = 1')
     .all<{ id: string }>()
     .then(({ results }) => results.forEach((j) => background('sync:' + j.id, () => runSyncInline(env, j.id))));

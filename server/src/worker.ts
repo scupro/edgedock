@@ -4,6 +4,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { createApp } from './app';
 import { indexChunk, indexInit, finishRun, finishSync, runCleanup, runIndexInline, runSyncInline, startRun, syncChunk, syncInit, type IndexState, type SyncState } from './jobs/tasks';
+import { getSettings } from './lib/settings';
 import type { Env, Runtime } from './lib/types';
 
 type WorkerEnv = Env & { INDEX_WORKFLOW?: Workflow; SYNC_WORKFLOW?: Workflow };
@@ -52,7 +53,8 @@ export default {
     }
     ctx.waitUntil(
       (async () => {
-        await runtime.triggerIndex(env);
+        if ((await getSettings(env)).nightlyIndex) await runtime.triggerIndex(env);
+        else console.log('[edgedock] nightly index rebuild disabled in settings');
         const { results } = await env.DB.prepare('SELECT id FROM sync_jobs WHERE enabled = 1').all<{ id: string }>();
         for (const j of results) await runtime.triggerSync(env, j.id);
       })(),
@@ -77,7 +79,7 @@ export class IndexWorkflow extends WorkflowEntrypoint<WorkerEnv, Record<string, 
     }
     await step.do('finish', async () => {
       await this.env.DB.prepare('DELETE FROM file_index WHERE storage_id NOT IN (SELECT id FROM storages)').run();
-      await finishRun(this.env, runId, 'success', { indexed: state.indexed });
+      await finishRun(this.env, runId, 'success', { indexed: state.indexed, written: state.written ?? 0 });
       return { indexed: state.indexed };
     });
   }

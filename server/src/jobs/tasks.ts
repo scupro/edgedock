@@ -5,9 +5,10 @@ import { getSettings } from '../lib/settings';
  * steps), or inline in a loop on Node / without Workflows.
  */
 import { uuid } from '../lib/crypto';
+import { escapeLike } from '../lib/fileindex';
 import { joinPath } from '../lib/path';
 import { consumeExpiredShares } from './cleanup';
-import type { Env } from '../lib/types';
+import type { DBPreparedStatement, Env } from '../lib/types';
 import { UploadService } from '../lib/uploads';
 import { loadMounts, Vfs } from '../storage/mounts';
 
@@ -31,6 +32,8 @@ export interface IndexState {
   current?: { storageId: string; queue: string[] };
   startedAt: number;
   indexed: number;
+  /** statements actually written to D1 (new / changed / removed rows) */
+  written?: number;
 }
 
 export async function indexInit(env: Env): Promise<IndexState> {
@@ -40,8 +43,8 @@ export async function indexInit(env: Env): Promise<IndexState> {
 
 /**
  * Process up to `maxDirs` directories. Returns the new state; `done` when finished.
- * Directory listings are written to file_index; stale rows of a storage are
- * removed once the storage walk finishes.
+ * Each directory listing is diffed against file_index (by parent); only new or
+ * changed rows are written and vanished ones deleted.
  */
 export async function indexChunk(env: Env, state: IndexState, maxDirs = 25): Promise<{ state: IndexState; done: boolean }> {
   const vfs = await Vfs.create(env);
@@ -56,7 +59,8 @@ export async function indexChunk(env: Env, state: IndexState, maxDirs = 25): Pro
     const mount = vfs.mounts.find((m) => m.row.id === s.current!.storageId);
     if (!mount || !s.current.queue.length) {
       if (mount) {
-        await env.DB.prepare('DELETE FROM file_index WHERE storage_id = ? AND indexed_at < ?').bind(mount.row.id, s.startedAt).run();
+        // rows from before the incremental index (no parent yet) that the walk never reached
+        await env.DB.prepare('DELETE FROM file_index WHERE storage_id = ? AND parent IS NULL').bind(mount.row.id).run();
       }
       s.current = undefined;
       continue;
@@ -70,16 +74,38 @@ export async function indexChunk(env: Env, state: IndexState, maxDirs = 25): Pro
       console.warn('[edgedock] index list failed', mount.row.name, rel, (e as Error).message);
       continue;
     }
+    const dirV = joinPath(mount.mountPath, rel);
+    const sid = mount.row.id;
+    // Diff this directory against what is already indexed; write only new / changed rows
+    // and delete rows that disappeared. D1 bills rows written, so unchanged files cost nothing.
+    const { results: existing } = await env.DB.prepare('SELECT path, name, is_dir, size, modified FROM file_index WHERE storage_id = ? AND parent = ?')
+      .bind(sid, dirV)
+      .all<{ path: string; name: string; is_dir: number; size: number; modified: number | null }>();
+    const old = new Map(existing.map((r) => [r.path, r]));
     const now = Date.now();
-    const stmts = entries.map((e) => {
+    const stmts: DBPreparedStatement[] = [];
+    for (const e of entries) {
       const vpath = joinPath(mount.mountPath, e.path);
       if (e.isDir) s.current!.queue.push(e.path);
-      return env.DB.prepare(
-        `INSERT INTO file_index (storage_id, path, name, is_dir, size, modified, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(storage_id, path) DO UPDATE SET name = excluded.name, is_dir = excluded.is_dir, size = excluded.size, modified = excluded.modified, indexed_at = excluded.indexed_at`,
-      ).bind(mount.row.id, vpath, e.name, e.isDir ? 1 : 0, e.size ?? 0, e.modified ?? null, now);
-    });
+      const isDir = e.isDir ? 1 : 0;
+      const size = e.size ?? 0;
+      const modified = e.modified ?? null;
+      const prev = old.get(vpath);
+      old.delete(vpath);
+      if (prev && prev.name === e.name && prev.is_dir === isDir && prev.size === size && (prev.modified ?? null) === modified) continue;
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO file_index (storage_id, path, parent, name, is_dir, size, modified, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(storage_id, path) DO UPDATE SET parent = excluded.parent, name = excluded.name, is_dir = excluded.is_dir, size = excluded.size, modified = excluded.modified, indexed_at = excluded.indexed_at`,
+        ).bind(sid, vpath, dirV, e.name, isDir, size, modified, now),
+      );
+    }
+    for (const [gone, r] of old) {
+      stmts.push(env.DB.prepare('DELETE FROM file_index WHERE storage_id = ? AND path = ?').bind(sid, gone));
+      if (r.is_dir) stmts.push(env.DB.prepare("DELETE FROM file_index WHERE storage_id = ? AND path LIKE ? ESCAPE '\\'").bind(sid, escapeLike(gone) + '/%'));
+    }
     for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+    s.written = (s.written ?? 0) + stmts.length;
     s.indexed += entries.length;
   }
   return { state: s, done: false };
@@ -96,7 +122,7 @@ export async function runIndexInline(env: Env): Promise<number> {
     }
     // rows of storages that no longer exist
     await env.DB.prepare('DELETE FROM file_index WHERE storage_id NOT IN (SELECT id FROM storages)').run();
-    await finishRun(env, run, 'success', { indexed: state.indexed });
+    await finishRun(env, run, 'success', { indexed: state.indexed, written: state.written ?? 0 });
     return state.indexed;
   } catch (e) {
     await finishRun(env, run, 'failed', (e as Error).message);

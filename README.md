@@ -19,7 +19,7 @@ EdgeDock 把多個儲存空間（S3 相容儲存、WebDAV、OneDrive、Google Dr
 - **分享連結**：可設定密碼、到期時間、存取次數上限；提供 `/raw/` 直連。
 - **API 金鑰**：唯讀或讀寫權限，可限制路徑前綴與到期時間，也可作為 WebDAV 密碼使用。
 - **WebDAV 伺服器**：`/dav` 端點，可用 Finder、Windows 檔案總管、rclone、RaiDrive 等掛載。
-- **排程工作**：Cron Trigger 清理過期上傳與分享、重建搜尋索引；Cloudflare Workflows 執行長時間的索引與同步工作。
+- **排程工作**：Cron Trigger 清理過期上傳與分享、每晚增量重建搜尋索引（只寫入新增、變動、刪除的檔案，可在設定關閉）；Cloudflare Workflows 執行長時間的索引與同步工作。
 - **PWA**：可安裝至桌面 / 手機，介面支援正體中文與英文。
 
 ## 架構

@@ -1,4 +1,4 @@
-import { basename, normalizePath } from './path';
+import { basename, dirname, normalizePath } from './path';
 import type { Env } from './types';
 
 export interface IndexHit {
@@ -18,10 +18,10 @@ export async function indexUpsert(
 ): Promise<void> {
   const p = normalizePath(vpath);
   await env.DB.prepare(
-    `INSERT INTO file_index (storage_id, path, name, is_dir, size, modified, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(storage_id, path) DO UPDATE SET name = excluded.name, is_dir = excluded.is_dir, size = excluded.size, modified = excluded.modified, indexed_at = excluded.indexed_at`,
+    `INSERT INTO file_index (storage_id, path, parent, name, is_dir, size, modified, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(storage_id, path) DO UPDATE SET parent = excluded.parent, name = excluded.name, is_dir = excluded.is_dir, size = excluded.size, modified = excluded.modified, indexed_at = excluded.indexed_at`,
   )
-    .bind(storageId, p, basename(p), entry.isDir ? 1 : 0, entry.size ?? 0, entry.modified ?? Date.now(), Date.now())
+    .bind(storageId, p, dirname(p), basename(p), entry.isDir ? 1 : 0, entry.size ?? 0, entry.modified ?? Date.now(), Date.now())
     .run();
 }
 
