@@ -45,7 +45,7 @@ export abstract class PartStoreDriver extends BaseDriver {
     this.env = ctx.env;
     this.storageId = ctx.storageId;
     this.multipart = {
-      create: (p, o) => this.mpCreate(p, o.contentType),
+      create: (p, o) => this.mpCreate(p, o.contentType, o.size),
       uploadPart: (_p, id, n, body, size) => this.mpPart(id, n, body, size),
       complete: (_p, id) => this.mpComplete(id),
       abort: (_p, id) => this.mpAbort(id),
@@ -58,8 +58,17 @@ export abstract class PartStoreDriver extends BaseDriver {
     return { presign: false, multipart: true, rangeRead: true, maxPartSize: this.partLimit, minPartSize: Math.min(1024 * 1024, this.partLimit) };
   }
 
-  /** upload one part; returns a reference stored in D1 */
-  protected abstract putPart(bytes: Uint8Array, name: string): Promise<PartRef>;
+  /**
+   * upload one part; returns a reference stored in D1.
+   * `whole` = this part is the entire file: it carries the original file name and its real
+   * content type, so the channel shows `photo.jpg` (with a preview) instead of `photo.jpg.0001`.
+   */
+  protected abstract putPart(bytes: Uint8Array, name: string, whole?: { contentType: string }): Promise<PartRef>;
+
+  /** name of part `n`: the original file name when the file is a single part, `name.000n` otherwise */
+  protected partName(file: string, n: number, single: boolean): string {
+    return single ? basename(file) : `${basename(file)}.${String(n).padStart(4, '0')}`;
+  }
   /** download (a byte range of) one part; `ranged` = the server honoured the Range header */
   protected abstract openPart(ref: PartRef, range?: { start: number; end: number }): Promise<{ body: ReadableStream<Uint8Array>; ranged: boolean }>;
   protected abstract deletePart(ref: PartRef): Promise<void>;
@@ -143,12 +152,18 @@ export abstract class PartStoreDriver extends BaseDriver {
     const parts: PartRef[] = [];
     let total = 0;
     let i = 0;
+    const ct = opts.contentType && opts.contentType !== 'application/octet-stream' ? opts.contentType : mimeFromPath(p);
     try {
-      for await (const piece of chunksOf(src, this.partLimit)) {
-        if (!piece.byteLength && i > 0) break;
-        if (!piece.byteLength) break; // empty file: no parts
-        parts.push(await this.putPart(piece, `${basename(p)}.${String(++i).padStart(4, '0')}`));
+      // look one chunk ahead: a file that fits in one part keeps its own name and type
+      const it = chunksOf(src, this.partLimit)[Symbol.asyncIterator]();
+      let cur = await it.next();
+      while (!cur.done && cur.value.byteLength) {
+        const piece = cur.value;
+        const next = await it.next();
+        const single = i === 0 && (next.done || !next.value.byteLength);
+        parts.push(await this.putPart(piece, this.partName(p, ++i, single), single ? { contentType: ct } : undefined));
         total += piece.byteLength;
+        cur = next;
       }
     } catch (e) {
       await this.dropParts(parts);
@@ -256,9 +271,12 @@ export abstract class PartStoreDriver extends BaseDriver {
   }
 
   // ------------------------------------------------------------ native multipart
-  private async mpCreate(path: string, contentType?: string): Promise<string> {
+  private async mpCreate(path: string, contentType?: string, size?: number): Promise<string> {
     const id = uuid();
-    await this.db.prepare('INSERT INTO blob_uploads (upload_id, storage_id, path, content_type, created_at) VALUES (?, ?, ?, ?, ?)').bind(id, this.storageId, normalizePath(path), contentType ?? null, Date.now()).run();
+    await this.db
+      .prepare('INSERT INTO blob_uploads (upload_id, storage_id, path, content_type, size, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(id, this.storageId, normalizePath(path), contentType ?? null, size ?? null, Date.now())
+      .run();
     return id;
   }
 
@@ -266,9 +284,12 @@ export abstract class PartStoreDriver extends BaseDriver {
     if (size > this.partLimit) throw new ProviderError(400, `Part larger than ${this.partLimit} bytes`);
     const bytes = await readUpTo(body as ReadableStream<Uint8Array>, this.partLimit);
     if (bytes.byteLength !== size) throw new ProviderError(400, `Part ${n}: got ${bytes.byteLength} of ${size} bytes`);
-    const up = await this.db.prepare('SELECT path FROM blob_uploads WHERE upload_id = ?').bind(id).first<{ path: string }>();
+    const up = await this.db.prepare('SELECT path, content_type, size FROM blob_uploads WHERE upload_id = ?').bind(id).first<{ path: string; content_type: string | null; size: number | null }>();
     if (!up) throw new ProviderError(404, 'Unknown upload');
-    const ref = await this.putPart(bytes, `${basename(up.path)}.${String(n).padStart(4, '0')}`);
+    // the whole file in part 1 (size known at create): keep the original name and type
+    const single = n === 1 && up.size != null && up.size === size;
+    const ct = up.content_type && up.content_type !== 'application/octet-stream' ? up.content_type : mimeFromPath(up.path);
+    const ref = await this.putPart(bytes, this.partName(up.path, n, single), single ? { contentType: ct } : undefined);
     const prev = await this.db.prepare('SELECT refs FROM blob_upload_parts WHERE upload_id = ? AND part_number = ?').bind(id, n).first<{ refs: string }>();
     await this.db
       .prepare('INSERT INTO blob_upload_parts (upload_id, part_number, refs, size, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(upload_id, part_number) DO UPDATE SET refs = excluded.refs, size = excluded.size')

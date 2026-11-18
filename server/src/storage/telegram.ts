@@ -66,13 +66,16 @@ export class TelegramDriver extends PartStoreDriver {
     return () => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   }
 
-  protected async putPart(bytes: Uint8Array, name: string): Promise<TgRef> {
+  protected async putPart(bytes: Uint8Array, name: string, whole?: { contentType: string }): Promise<TgRef> {
+    // Always sendDocument (never sendPhoto, which recompresses and would corrupt downloads).
+    // A whole file goes out under its own name and MIME type, so Telegram shows the image preview;
+    // split parts stay opaque octet-streams named `file.ext.000n`.
     const msg = await this.call<{ message_id: number; document?: { file_id: string; file_size?: number } }>('sendDocument', () => {
       const fd = new FormData();
       fd.set('chat_id', this.cfg.chatId);
       fd.set('disable_notification', 'true');
-      fd.set('disable_content_type_detection', 'true');
-      fd.set('document', new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }), name);
+      if (!whole) fd.set('disable_content_type_detection', 'true');
+      fd.set('document', new Blob([bytes as unknown as ArrayBuffer], { type: whole?.contentType || 'application/octet-stream' }), name);
       return { method: 'POST', body: fd };
     });
     if (!msg.document?.file_id) throw new ProviderError(502, 'Telegram returned no document');

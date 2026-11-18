@@ -68,11 +68,11 @@ export class DiscordDriver extends PartStoreDriver {
     });
   }
 
-  protected async putPart(bytes: Uint8Array, name: string): Promise<DcRef> {
+  protected async putPart(bytes: Uint8Array, name: string, whole?: { contentType: string }): Promise<DcRef> {
     const res = await this.api(`/channels/${this.cfg.channelId}/messages`, () => {
       const fd = new FormData();
       fd.set('payload_json', JSON.stringify({ content: '', attachments: [{ id: 0, filename: name }], flags: 4096 }));
-      fd.set('files[0]', new Blob([bytes as unknown as ArrayBuffer], { type: 'application/octet-stream' }), name);
+      fd.set('files[0]', new Blob([bytes as unknown as ArrayBuffer], { type: whole?.contentType || 'application/octet-stream' }), name);
       return { method: 'POST', body: fd };
     });
     await ensureOk(res, 'Discord upload');
